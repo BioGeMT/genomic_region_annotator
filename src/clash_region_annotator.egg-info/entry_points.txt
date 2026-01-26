@@ -1,2 +1,0 @@
-[console_scripts]
-genomic-region-annotator = genomic_region_annotator.cli:cli
