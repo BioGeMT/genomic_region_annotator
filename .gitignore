@@ -17,13 +17,10 @@ conda-meta/
 # VS Code
 .vscode/
 
-# Data (keep raw out of git if large)
+# Data 
 data/annotations/*
-!data/annotations/.gitkeep
 data/raw/*
-!data/raw/.gitkeep
 data/processed/*
-!data/processed/.gitkeep
 
 # OS
 .DS_Store
