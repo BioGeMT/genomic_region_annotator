@@ -1,6 +1,6 @@
 # Genomic Region Annotator
 
-A **transcript-first genomic interval annotation tool** based on Ensembl GTF files.
+A **genomic interval annotation tool** based on Ensembl GTF files.
 
 > **Key principle**  
 > This is a transcript-first region annotator: each interval is assigned to a single transcript, and all region labels and coordinates are interpreted in that transcript’s context.
@@ -20,15 +20,12 @@ A **transcript-first genomic interval annotation tool** based on Ensembl GTF fil
 - transcript / gene
 - intergenic
 
-The tool is **not CLASH-specific** — it works for any genomic intervals.
-
-### What makes it different?
+### Key points
 
 - **Transcript-first annotation**
-  - Each input interval is assigned to **one transcript**, not multiple genes/transcripts.
   - Transcript selection prioritizes **protein-coding transcripts** and **maximum overlap**.
 - **Multi-label annotation**
-  - You get:
+  - Output fields:
     - `region_all` – all overlapping regions
     - `region_dominant` – dominant region by overlap
     - `region_primary` – single region by biological priority
@@ -36,9 +33,6 @@ The tool is **not CLASH-specific** — it works for any genomic intervals.
   - Outputs **strand-aware transcript-relative coordinates** (`rel_start`, `rel_end`)
 - **Intron inference**
   - Introns are derived when not explicitly present in the GTF
-- **Fast**
-  - GTFs are cached as Parquet on first use
-
 ---
 
 ## Installation
@@ -48,16 +42,18 @@ The tool is **not CLASH-specific** — it works for any genomic intervals.
 ```bash
 git clone git@github.com:BioGeMT/genomic_region_annotator.git
 cd genomic_region_annotator
-2. Create the conda environment
-bash
-Copy code
+```
+### 2. Create the conda environment
+```bash
 conda env create -f environment.yml
 conda activate genomic-region-annotator
-3. Install the package (editable mode)
-bash
-Copy code
+```
+### 3. Install the package
+```bash
 pip install -e .
-Input format
+```
+
+## Input format
 Input must be a TSV file with the following columns:
 
 column	description
@@ -66,31 +62,31 @@ start	Start coordinate
 end	End coordinate
 strand	+ or -
 
-Coordinate conventions
+## Coordinate conventions
 Use --coords to specify input coordinates:
 
 1-based (default): 1-based inclusive (GTF / GFF / SAM-like)
 
 bed: 0-based half-open (BED format)
 
-Internally, all coordinates are converted to 0-based half-open for correctness and consistency.
+Internally, all coordinates are converted to 0-based half-open.
 
-Basic usage
-Annotate using an Ensembl release (auto-download)
-bash
-Copy code
+## Basic usage
+### Annotate using an Ensembl release (auto-download)
+```bash
 genomic-region-annotator annotate \
   --input data/raw/intervals.tsv \
   --release 115 \
   --output annotated.tsv
-Annotate using a local GTF
-bash
-Copy code
+```
+### Annotate using a local GTF
+```bash
 genomic-region-annotator annotate \
   --input intervals.tsv \
   --gtf Homo_sapiens.GRCh38.115.gtf \
   --output annotated.tsv
-Output columns
+```
+### Output columns
 column	description
 region_all	All overlapping region labels (comma-separated)
 region_dominant	Region with maximum bp overlap
@@ -105,11 +101,11 @@ rel_start	Transcript-relative start (1-based, strand-aware)
 rel_end	Transcript-relative end (1-based, strand-aware)
 annotation_notes	Warnings or fallback behavior notes
 
-Region logic
+### Region logic
 region_all
 All regions overlapped by the interval within the selected transcript.
 
-Example:
+#### Example:
 
 Copy code
 three_prime_utr,CDS,stop_codon,exon
@@ -161,9 +157,9 @@ GTF files do not explicitly define introns
 
 Introns are derived as:
 
-ini
-Copy code
+```ini
 intron_bp = transcript_overlap - exon_overlap
+```
 If transcript features are missing:
 
 Introns are estimated from read length
@@ -177,17 +173,18 @@ Copy code
 --report
 Example:
 
-yaml
-Copy code
+```yaml
+
 Summary: 8,873 annotated / 285 intergenic
 Top region_primary counts:
   CDS: 3,421
   three_prime_utr: 2,114
-Write statistics to file
-bash
-Copy code
+```
+### Write statistics to file
+```bash
 --stats-out stats.tsv
 --top-n 20
+```
 The stats file includes:
 
 Annotated vs intergenic counts
@@ -200,9 +197,9 @@ Top genes and transcripts
 
 Filtering intergenic regions
 Drop intergenic rows
-bash
-Copy code
+```bash
 --drop-intergenic
+```
 (Default behavior keeps all rows.)
 
 GTF caching
