@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genomic-region-annotator"
+version = "0.1.0"
+description = "Annotate Genomic read coordinates to transcript regions (UTR/CDS/exon/intron) using Ensembl."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas",
+  "numpy",
+  "click",
+  "intervaltree",
+  "pyranges",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+genomic-region-annotator = "genomic_region_annotator.cli:cli"

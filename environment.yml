@@ -1,0 +1,28 @@
+name: genomic-region-annotator
+channels:
+  - conda-forge
+dependencies:
+  # Core
+  - python=3.11.6
+  - pip=23.3
+
+  # Data handling
+  - pandas=2.1.4
+  - numpy=1.26.2
+  - pyarrow=14.0.1
+
+  # CLI / utilities
+  - click=8.1.7
+  - tqdm=4.66.1
+  - requests=2.31.0
+  - intervaltree=3.1.0
+
+  # Bio
+  - biopython=1.83
+
+  # Pip-only (genomics + dev tools)
+  - pip:
+      - pyranges==0.0.129
+      - gffutils==0.12
+      - mypy==1.8.0
+      - ruff==0.1.9
