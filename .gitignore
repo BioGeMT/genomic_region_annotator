@@ -18,10 +18,10 @@ conda-meta/
 .vscode/
 
 # Data (keep raw out of git if large)
+data/annotations/*
+!data/annotations/.gitkeep
 data/raw/*
 !data/raw/.gitkeep
-data/interim/*
-!data/interim/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
 
