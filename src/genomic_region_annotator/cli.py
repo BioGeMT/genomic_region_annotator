@@ -43,7 +43,11 @@ def download_gtf_cmd(release: int, outdir: str, species: str, assembly: str | No
     "output_path",
     required=True,
     type=click.Path(),
-    help="Output base path (with or without .tsv). Produces <base>_matrix.tsv, <base>_transcripts.tsv, <base>_stats.tsv.",
+    help=(
+        "Output base path (with or without .tsv). "
+        "Writes into <output_dir>/step1/ as: "
+        "<stem>_input_with_ids.tsv, <stem>_matrix.tsv, <stem>_transcripts.tsv, <stem>_step1_stats.tsv"
+    ),
 )
 
 # GTF source (exactly one)
@@ -114,8 +118,8 @@ def download_gtf_cmd(release: int, outdir: str, species: str, assembly: str | No
 @click.option("--debug-n", type=int, default=20, show_default=True, help="Reserved (compatibility).")
 
 # Stats
-@click.option("--stats-out", default=None, type=click.Path(), help="Write run statistics to this TSV file.")
-@click.option("--top-n", default=20, show_default=True, type=int, help="Top N genes to include in stats output.")
+@click.option("--stats-out", default=None, type=click.Path(), help="Write STEP1 stats to this TSV file (optional).")
+@click.option("--top-n", default=20, show_default=True, type=int, help="Top N genes to include in STEP1 stats output.")
 def annotate_cmd(
     input_path: str,
     output_path: str,
@@ -169,14 +173,14 @@ def annotate_cmd(
     "transcripts_tsv",
     required=True,
     type=click.Path(exists=True),
-    help="Path to <base>_transcripts.tsv produced by the annotate step.",
+    help="Path to step1/<stem>_transcripts.tsv produced by the annotate step.",
 )
 @click.option(
     "--matrix",
     "matrix_tsv",
     required=True,
     type=click.Path(exists=True),
-    help="Path to <base>_matrix.tsv produced by the annotate step (used for UNION composition).",
+    help="Path to step1/<stem>_matrix.tsv produced by the annotate step (used for UNION composition).",
 )
 @click.option(
     "--output",
@@ -184,7 +188,15 @@ def annotate_cmd(
     required=False,
     default=None,
     type=click.Path(),
-    help="Output path. Default: derive from transcripts path as <base>_site_summary.tsv",
+    help="Output path for site summary. Default: step2/<stem>_site_summary.tsv (if inputs are in step1/).",
+)
+@click.option(
+    "--stats-out",
+    "stats_out",
+    required=False,
+    default=None,
+    type=click.Path(),
+    help="Output path for STEP2 stats TSV. Default: step2/<stem>_step2_stats.tsv (if inputs are in step1/).",
 )
 @click.option(
     "--policy",
@@ -200,19 +212,32 @@ def annotate_cmd(
     type=click.Choice(["coverage", "priority"], case_sensitive=False),
     help="How to define dominant region from region composition.",
 )
+@click.option(
+    "--report",
+    is_flag=True,
+    default=False,
+    help="Print a small report to stdout (also writes STEP2 stats TSV).",
+)
+@click.option("--top-n", default=20, show_default=True, type=int, help="Top N patterns/genes/transcripts in STEP2 stats.")
 def summarize_sites_cmd(
     transcripts_tsv: str,
     matrix_tsv: str,
     output_tsv: str | None,
+    stats_out: str | None,
     policy: str,
     dominance: str,
+    report: bool,
+    top_n: int,
 ):
     run_summarize_sites(
         transcripts_tsv=transcripts_tsv,
         matrix_tsv=matrix_tsv,
         output_tsv=output_tsv,
+        stats_out=stats_out,
         policy=policy,
         dominance=dominance,
+        report=report,
+        top_n=top_n,
     )
 
 

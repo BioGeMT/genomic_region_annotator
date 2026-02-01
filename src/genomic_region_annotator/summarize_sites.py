@@ -20,14 +20,40 @@ def log(msg: str) -> None:
 PRIORITY = ["UTR3", "CDS", "UTR5", "EXON_OTHER", "INTRON", "INTERGENIC"]
 
 
-def _derive_output_path(transcripts_tsv: str, output_path: Optional[str]) -> str:
-    if output_path:
-        return output_path
-    p = Path(transcripts_tsv)
-    name = p.name
-    if name.endswith("_transcripts.tsv"):
-        return str(p.with_name(name.replace("_transcripts.tsv", "_site_summary.tsv")))
-    return str(p.with_suffix("")) + "_site_summary.tsv"
+def _derive_step2_paths(
+    transcripts_tsv: str,
+    matrix_tsv: str,
+    output_path: Optional[str],
+    stats_out: Optional[str],
+) -> tuple[str, str]:
+    """
+    Default behavior:
+      - if transcripts path is .../step1/<stem>_transcripts.tsv
+        -> write step2/<stem>_site_summary.tsv and step2/<stem>_step2_stats.tsv
+      - otherwise, write next to transcripts_tsv
+    """
+    if output_path and stats_out:
+        return output_path, stats_out
+
+    txp = Path(transcripts_tsv)
+    mxp = Path(matrix_tsv)
+
+    # infer a stem
+    name = txp.name
+    stem = name.replace("_transcripts.tsv", "") if name.endswith("_transcripts.tsv") else txp.stem
+
+    # step1 -> step2 folder convention
+    if txp.parent.name == "step1":
+        step2_dir = txp.parent.parent / "step2"
+    else:
+        step2_dir = txp.parent
+
+    step2_dir.mkdir(parents=True, exist_ok=True)
+
+    out_default = str(step2_dir / f"{stem}_site_summary.tsv")
+    stats_default = str(step2_dir / f"{stem}_step2_stats.tsv")
+
+    return output_path or out_default, stats_out or stats_default
 
 
 def _dominant_region(bp: dict[str, int], dominance: str) -> str:
@@ -36,6 +62,7 @@ def _dominant_region(bp: dict[str, int], dominance: str) -> str:
             if int(bp.get(r, 0)) > 0:
                 return r
         return "INTERGENIC"
+
     # coverage-dominant
     best_r = "INTERGENIC"
     best_v = -1
@@ -71,6 +98,7 @@ def _select_transcript_clash_utr3_first(g: pd.DataFrame) -> pd.Series:
       then max INTRON bp (tx - exon)
       then max exon bp
       then max tx overlap
+
     Tie-breakers:
       - prefer contained_100pct == 1 (if present)
       - stable by transcript_id (lexicographic)
@@ -193,23 +221,61 @@ def _bp_from_matrix_rows(g: pd.DataFrame, read_len: int) -> dict[str, int]:
     }
 
 
+def _stats_from_summary(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    rows.append({"metric": "step", "value": "step2_transcript_selection"})
+    rows.append({"metric": "n_reads", "value": int(len(df))})
+
+    if "ambiguous_union_vs_selected" in df.columns:
+        amb = int(df["ambiguous_union_vs_selected"].fillna(0).astype(int).sum())
+        rows.append({"metric": "n_ambiguous_union_vs_selected", "value": amb})
+        rows.append({"metric": "fraction_ambiguous_union_vs_selected", "value": round(amb / len(df), 6) if len(df) else 0.0})
+
+    for col in ["dominant_region_selected", "dominant_region_union"]:
+        if col in df.columns:
+            vc = df[col].fillna("NA").astype(str).value_counts()
+            for k, v in vc.items():
+                rows.append({"metric": f"{col}_count__{k}", "value": int(v)})
+                rows.append({"metric": f"{col}_fraction__{k}", "value": round(int(v) / len(df), 6) if len(df) else 0.0})
+
+    for col in ["regions_present_selected", "regions_present_union"]:
+        if col in df.columns:
+            vc = df[col].fillna("NA").astype(str).value_counts().head(max(1, int(top_n)))
+            for i, (k, v) in enumerate(vc.items(), start=1):
+                rows.append({"metric": f"top_{col}_{i}", "value": k})
+                rows.append({"metric": f"top_{col}_{i}_count", "value": int(v)})
+
+    for col in ["selected_gene_name", "selected_transcript_id"]:
+        if col in df.columns:
+            vc = df[col].fillna("NA").astype(str).value_counts().head(max(1, int(top_n)))
+            for i, (k, v) in enumerate(vc.items(), start=1):
+                rows.append({"metric": f"top_{col}_{i}", "value": k})
+                rows.append({"metric": f"top_{col}_{i}_count", "value": int(v)})
+
+    return pd.DataFrame(rows)
+
+
 def run(
     *,
     transcripts_tsv: str,
     matrix_tsv: str,
     output_tsv: Optional[str] = None,
+    stats_out: Optional[str] = None,
     policy: str = "clash_utr3_first",
     dominance: str = "coverage",
+    report: bool = False,
+    top_n: int = 20,
 ) -> None:
     """
-    Explicit Step 2 (assumption-bearing):
+    STEP 2: Explicit transcript selection + site summary (assumption-bearing)
 
     Inputs:
-      - transcripts_tsv: <base>_transcripts.tsv from annotate
-      - matrix_tsv: <base>_matrix.tsv from annotate (used for UNION composition)
+      - transcripts_tsv: step1/<stem>_transcripts.tsv from annotate
+      - matrix_tsv:      step1/<stem>_matrix.tsv from annotate (used for UNION composition)
 
-    Output:
-      - <base>_site_summary.tsv (unless output_tsv is provided)
+    Outputs (defaults):
+      - step2/<stem>_site_summary.tsv
+      - step2/<stem>_step2_stats.tsv
 
     dominance:
       - 'coverage' (recommended): dominant region = max bp (ties broken by PRIORITY)
@@ -220,7 +286,7 @@ def run(
     if policy != "clash_utr3_first":
         raise ValueError("Currently supported policy: clash_utr3_first")
 
-    out_path = _derive_output_path(transcripts_tsv, output_tsv)
+    out_path, stats_path = _derive_step2_paths(transcripts_tsv, matrix_tsv, output_tsv, stats_out)
 
     log(f"Reading transcripts: {transcripts_tsv}")
     tx = pd.read_csv(
@@ -310,4 +376,19 @@ def run(
     log(f"Writing: {out_path}")
     out.to_csv(out_path, sep="\t", index=False)
 
+    log(f"Computing stats: {stats_path}")
+    stats_df = _stats_from_summary(out, top_n=top_n)
+    stats_df.to_csv(stats_path, sep="\t", index=False)
+
     log(f"Done. Wrote {len(out):,} rows in {time.time()-t0:.1f}s")
+
+    if report:
+        log("Report (Step 2)")
+        if "dominant_region_selected" in out.columns:
+            vc = out["dominant_region_selected"].value_counts()
+            log("Top dominant_region_selected:")
+            for k, v in vc.head(10).items():
+                log(f"  {k}: {v}")
+        if "ambiguous_union_vs_selected" in out.columns:
+            amb = int(out["ambiguous_union_vs_selected"].sum())
+            log(f"Ambiguous union vs selected: {amb}/{len(out)} ({(amb/len(out)):.3f})")
