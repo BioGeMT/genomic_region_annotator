@@ -1,8 +1,10 @@
+LICENSE
 README.md
 pyproject.toml
 src/genomic_region_annotator/annotate.py
 src/genomic_region_annotator/cli.py
 src/genomic_region_annotator/download.py
+src/genomic_region_annotator/summarize_sites.py
 src/genomic_region_annotator.egg-info/PKG-INFO
 src/genomic_region_annotator.egg-info/SOURCES.txt
 src/genomic_region_annotator.egg-info/dependency_links.txt
