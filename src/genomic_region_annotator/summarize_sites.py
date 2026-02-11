@@ -75,6 +75,25 @@ def _ensure_int(x: Any) -> int:
     return int(x)
 
 
+def _maybe_int(row: pd.Series, col: str) -> Optional[int]:
+    """
+    Return int(row[col]) if the column exists and is not NA; else None.
+    Using None keeps blanks in the TSV if the Step1 transcripts.tsv is missing the column.
+    """
+    if col not in row.index:
+        return None
+    v = row.get(col)
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    try:
+        return int(v)
+    except Exception:
+        return None
+    
+
 def _select_transcript_clash_utr3_first(g: pd.DataFrame) -> pd.Series:
     df = g.copy()
     for c in ["overlap_utr3_bp", "overlap_cds_bp", "overlap_utr5_bp", "overlap_exon_bp", "overlap_tx_bp"]:
@@ -265,6 +284,15 @@ def run(
                 "selected_transcript_id": str(sel.get("transcript_id", "")),
                 "selected_gene_id": str(sel.get("gene_id", "")),
                 "selected_gene_name": str(sel.get("gene_name", "")),
+                # Transcript-relative coordinates for the SELECTED transcript (from Step 1 transcripts.tsv)
+                "selected_tx_start": _maybe_int(sel, "tx_start"),
+                "selected_tx_end": _maybe_int(sel, "tx_end"),
+                "selected_read_start_in_tx_1based": _maybe_int(sel, "read_start_in_tx_1based"),
+                "selected_read_end_in_tx_1based": _maybe_int(sel, "read_end_in_tx_1based"),
+                "selected_overlap_start_genome_1based": _maybe_int(sel, "overlap_start_genome_1based"),
+                "selected_overlap_end_genome_1based": _maybe_int(sel, "overlap_end_genome_1based"),
+                "selected_overlap_start_in_tx_1based": _maybe_int(sel, "overlap_start_in_tx_1based"),
+                "selected_overlap_end_in_tx_1based": _maybe_int(sel, "overlap_end_in_tx_1based"),
                 "dominant_region_selected": dom_sel,
                 "regions_present_selected": _regions_present(sel_bp),
                 "bp_utr3_selected": sel_bp["UTR3"],
