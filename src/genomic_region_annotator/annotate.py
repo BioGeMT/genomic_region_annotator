@@ -11,9 +11,6 @@ from typing import Any, Iterable, Optional
 import pandas as pd
 
 
-# =============================================================================
-# Logging
-# =============================================================================
 def _ts() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -22,29 +19,21 @@ def log(msg: str) -> None:
     print(f"[{_ts()}] [INFO] {msg}", flush=True)
 
 
-# =============================================================================
-# Transcript model
-# =============================================================================
 @dataclass(frozen=True)
 class TranscriptModel:
     chrom: str
-    strand: str  # '+' or '-'
+    strand: str
     transcript_id: str
     gene_id: str
     gene_name: str
-
-    tx_start: int  # 1-based inclusive (derived from exons)
-    tx_end: int    # 1-based inclusive (derived from exons)
-
-    exons: tuple[tuple[int, int], ...]  # 1-based inclusive merged
-    cds: tuple[tuple[int, int], ...]    # 1-based inclusive merged
-    utr5: tuple[tuple[int, int], ...]   # 1-based inclusive merged (may be inferred)
-    utr3: tuple[tuple[int, int], ...]   # 1-based inclusive merged (may be inferred)
+    tx_start: int
+    tx_end: int
+    exons: tuple[tuple[int, int], ...]
+    cds: tuple[tuple[int, int], ...]
+    utr5: tuple[tuple[int, int], ...]
+    utr3: tuple[tuple[int, int], ...]
 
 
-# =============================================================================
-# Interval helpers (1-based inclusive)
-# =============================================================================
 def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     if not intervals:
         return []
@@ -78,7 +67,6 @@ def _iter_bins(start: int, end: int, bin_size: int) -> Iterable[int]:
 
 
 def _pos_in_intervals(pos: int, intervals: tuple[tuple[int, int], ...]) -> bool:
-    # intervals are merged & sorted; exons/CDS/UTRs per transcript are small
     for s, e in intervals:
         if pos < s:
             return False
@@ -87,19 +75,11 @@ def _pos_in_intervals(pos: int, intervals: tuple[tuple[int, int], ...]) -> bool:
     return False
 
 
-# =============================================================================
-# UTR inference (if missing)
-# =============================================================================
 def _infer_utrs_from_exons_and_cds(
     exons: list[tuple[int, int]],
     cds: list[tuple[int, int]],
     strand: str,
 ) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
-    """
-    Infer UTRs from exon/CDS when explicit UTR features are absent.
-      '+' strand: utr5 = exonic bases < CDS_start; utr3 = exonic bases > CDS_end
-      '-' strand: utr5 = exonic bases > CDS_end; utr3 = exonic bases < CDS_start
-    """
     ex_m = _merge_intervals(exons)
     cds_m = _merge_intervals(cds)
     if not ex_m or not cds_m:
@@ -144,9 +124,6 @@ def _infer_utrs_from_exons_and_cds(
     return _merge_intervals(utr5), _merge_intervals(utr3)
 
 
-# =============================================================================
-# GTF loading (filtered, chunked, fast attribute extraction)
-# =============================================================================
 def _cache_key_for_gtf(gtf_path: str) -> str:
     p = Path(gtf_path)
     st = p.stat()
@@ -155,11 +132,6 @@ def _cache_key_for_gtf(gtf_path: str) -> str:
 
 
 def _load_gtf_dataframe_filtered_fast(gtf_path: str, chroms_needed: set[str]) -> pd.DataFrame:
-    """
-    Load only GTF rows on chromosomes present in input.
-    Keeps features: exon, CDS, five_prime_utr, three_prime_utr.
-    Extracts transcript_id / gene_id / gene_name via vectorized regex.
-    """
     cols = ["seqname", "source", "feature", "start", "end", "score", "strand", "frame", "attribute"]
     wanted_features = {"exon", "CDS", "five_prime_utr", "three_prime_utr"}
 
@@ -176,7 +148,7 @@ def _load_gtf_dataframe_filtered_fast(gtf_path: str, chroms_needed: set[str]) ->
         comment="#",
         header=None,
         names=cols,
-        usecols=[0, 2, 3, 4, 6, 8],  # seqname, feature, start, end, strand, attribute
+        usecols=[0, 2, 3, 4, 6, 8],
         dtype={
             "seqname": "string",
             "feature": "string",
@@ -190,8 +162,7 @@ def _load_gtf_dataframe_filtered_fast(gtf_path: str, chroms_needed: set[str]) ->
 
     for k, chunk in enumerate(reader, start=1):
         chunk = chunk.loc[
-            chunk["seqname"].astype(str).isin(chroms_needed)
-            & chunk["feature"].isin(wanted_features)
+            chunk["seqname"].astype(str).isin(chroms_needed) & chunk["feature"].isin(wanted_features)
         ].copy()
 
         if chunk.empty:
@@ -222,10 +193,6 @@ def _load_gtf_dataframe_filtered_fast(gtf_path: str, chroms_needed: set[str]) ->
 
 
 def _build_transcript_models_single_pass(gtf_df: pd.DataFrame) -> list[TranscriptModel]:
-    """
-    Build TranscriptModels by sorting by transcript_id and scanning once.
-    Transcript span is derived from exons.
-    """
     log("Building transcript models (single-pass over transcript_id)...")
     t0 = time.time()
 
@@ -260,7 +227,6 @@ def _build_transcript_models_single_pass(gtf_df: pd.DataFrame) -> list[Transcrip
         utr5_m = _merge_intervals(utr5)
         utr3_m = _merge_intervals(utr3)
 
-        # If explicit UTRs are absent but exon+CDS exist, infer UTRs (standard GTF logic)
         if (not utr5_m and not utr3_m) and ex_m and cds_m:
             utr5_m, utr3_m = _infer_utrs_from_exons_and_cds(ex_m, cds_m, cur_strand)
 
@@ -279,7 +245,6 @@ def _build_transcript_models_single_pass(gtf_df: pd.DataFrame) -> list[Transcrip
                 utr3=tuple(utr3_m),
             )
         )
-
         exons, cds, utr5, utr3 = [], [], [], []
 
     for i, r in enumerate(gtf_df.itertuples(index=False), start=1):
@@ -338,14 +303,7 @@ def _load_or_build_models_filtered(gtf_path: str, cache_dir: str, chroms_needed:
     return models
 
 
-# =============================================================================
-# Candidate retrieval via bin index
-# =============================================================================
 def _build_bin_index(models: list[TranscriptModel], bin_size: int = 100_000) -> dict[tuple[str, str, int], list[int]]:
-    """
-    Map (chrom, strand, bin) -> transcript indices.
-    Index transcript span only (filter requires containment/overlap with transcript span).
-    """
     log(f"Building bin index (bin_size={bin_size})...")
     t0 = time.time()
     index: dict[tuple[str, str, int], list[int]] = {}
@@ -377,9 +335,6 @@ def _candidate_indices(
     return cand
 
 
-# =============================================================================
-# Matrix construction
-# =============================================================================
 REGIONS = ["CDS", "UTR5", "UTR3", "EXON", "INTRON", "INTERGENIC"]
 
 
@@ -390,7 +345,6 @@ def _normalize_query_coords(start: int, end: int, coords: str) -> tuple[int, int
             s, e = e, s
         return s, e
     if coords.lower() == "bed":
-        # BED: 0-based half-open -> 1-based inclusive
         s0, e0 = int(start), int(end)
         if s0 > e0:
             s0, e0 = e0, s0
@@ -403,11 +357,6 @@ def _normalize_query_coords(start: int, end: int, coords: str) -> tuple[int, int
 
 
 def _per_nt_region_flags_for_transcript(m: TranscriptModel, qiv: tuple[int, int]) -> dict[str, list[int]]:
-    """
-    For a transcript, compute per-nt flags on the query interval.
-    Raw sets:
-      - CDS, UTR5, UTR3, EXON (any exon), INTRON (within tx span but not exon)
-    """
     s, e = qiv
     L = e - s + 1
     cds_flags = [0] * L
@@ -434,21 +383,15 @@ def _per_nt_region_flags_for_transcript(m: TranscriptModel, qiv: tuple[int, int]
 
 
 def _or_region_matrices(mats: list[dict[str, list[int]]], L: int) -> dict[str, list[int]]:
-    """
-    Union across transcripts: OR per cell.
-    INTERGENIC is 1 where no other region is 1.
-    """
     out = {r: [0] * L for r in REGIONS}
     if not mats:
         out["INTERGENIC"] = [1] * L
         return out
 
     for r in ["CDS", "UTR5", "UTR3", "EXON", "INTRON"]:
-        # per-nt OR across passing transcripts
         for i in range(L):
             out[r][i] = 1 if any(m[r][i] == 1 for m in mats) else 0
 
-    # INTERGENIC = none of the above regions
     for i in range(L):
         out["INTERGENIC"][i] = 1 if (
             out["CDS"][i] == 0
@@ -481,53 +424,25 @@ def _safe_median(xs: list[int]) -> float:
     return float(statistics.median(xs)) if xs else 0.0
 
 
-def _stem_from_base(base: Path) -> str:
-    # base can be ".../name" or ".../name.whatever" (but we stripped .tsv already)
-    return base.name
-
-
-# =============================================================================
-# Public API (CLI entrypoint) — Step 1 (evidence only)
-# =============================================================================
 def run(
     *,
     input_path: str,
     gtf_path: str,
     output_tsv: str,
     coords: str = "1-based",
-    transcript_first: bool = True,  # kept for CLI compatibility; transcript choice is Step 2 now
-    min_overlap_nt: Optional[int] = None,  # None => require 100% containment
+    transcript_first: bool = True,
+    min_overlap_nt: Optional[int] = None,
     debug_row_id: Optional[int] = None,
-    debug_n: int = 20,  # unused; kept for CLI compatibility
-    drop_intergenic: bool = False,  # if True, do not output INTERGENIC rows in matrix
+    debug_n: int = 20,
+    drop_intergenic: bool = False,
     cache_dir: str = ".cache/genomic-region-annotator",
     report: bool = False,
-    stats_out: Optional[str] = None,  # if None, writes <step1_dir>/<stem>_step1_stats.tsv
-    top_n: int = 20,  # top genes in stats output
+    stats_out: Optional[str] = None,
+    top_n: int = 20,
 ) -> None:
-    """
-    STEP 1: Evidence-only annotation (no transcript selection assumptions)
-
-    Given reads/intervals, we:
-      1) assign stable ids (001, 002, ...) and write input_with_ids.tsv
-      2) compute passing transcripts per read (filtered by containment/min-overlap)
-      3) compute a UNION per-nt region matrix across passing transcripts
-      4) write:
-           - step1/<stem>_input_with_ids.tsv
-           - step1/<stem>_matrix.tsv
-           - step1/<stem>_transcripts.tsv
-           - step1/<stem>_step1_stats.tsv
-
-    Transcript overlap filter (strand + chromosome must match):
-      - Default (min_overlap_nt is None): require 100% containment (read fully within transcript span [tx_start, tx_end]).
-      - If min_overlap_nt is set: keep transcripts with overlap(read, transcript span) >= min_overlap_nt.
-
-    NOTE: Transcript selection and final region calls are done in STEP 2 (summarize-sites),
-          where all assumptions are explicit.
-    """
     base = _output_base(output_tsv)
     base_dir = base.parent if str(base.parent) not in {"", "."} else Path(".")
-    stem = _stem_from_base(base)
+    stem = base.name
 
     step1_dir = base_dir / "step1"
     step1_dir.mkdir(parents=True, exist_ok=True)
@@ -548,12 +463,9 @@ def run(
         df = df.rename(columns={"id": "original_id"})
 
     df.insert(0, "id", _make_ids(len(df)))
-    log(f"Assigned ids: {df['id'].iloc[0]} .. {df['id'].iloc[-1]}")
-
     df["strand"] = df["strand"].fillna(".").astype("string")
     df.loc[~df["strand"].isin(["+", "-", "."]), "strand"] = "."
 
-    # Normalize coords and compute read length
     starts_1b: list[int] = []
     ends_1b: list[int] = []
     lens: list[int] = []
@@ -576,7 +488,6 @@ def run(
 
     log("Stage 2/7: load/build transcript models (filtered)")
     models = _load_or_build_models_filtered(gtf_path=gtf_path, cache_dir=cache_dir, chroms_needed=chroms_needed)
-    log(f"Transcript models loaded: {len(models):,}")
 
     log("Stage 3/7: build bin index")
     bin_size = 100_000
@@ -596,8 +507,8 @@ def run(
     n = len(df)
     progress_every = 2_000 if n < 50_000 else 10_000
 
-    # Stats accumulators
     tx_count_per_read: list[int] = []
+
     reads_with_any_tx = 0
     reads_with_any_cds = 0
     reads_with_any_utr3 = 0
@@ -636,8 +547,9 @@ def run(
         if passing:
             reads_with_any_tx += 1
 
-        # transcript report (per passing transcript)
         for m in passing:
+            ov_s = max(s, m.tx_start)
+            ov_e = min(e, m.tx_end)
             tx_rows.append(
                 {
                     "id": rid,
@@ -652,6 +564,12 @@ def run(
                     "transcript_strand": m.strand,
                     "tx_start": m.tx_start,
                     "tx_end": m.tx_end,
+                    "read_start_in_tx_1based": (s - m.tx_start + 1),
+                    "read_end_in_tx_1based": (e - m.tx_start + 1),
+                    "overlap_start_genome_1based": ov_s,
+                    "overlap_end_genome_1based": ov_e,
+                    "overlap_start_in_tx_1based": (ov_s - m.tx_start + 1),
+                    "overlap_end_in_tx_1based": (ov_e - m.tx_start + 1),
                     "overlap_tx_bp": _ovl_bp(qiv, (m.tx_start, m.tx_end)),
                     "contained_100pct": 1 if _within(qiv, (m.tx_start, m.tx_end)) else 0,
                     "overlap_exon_bp": _sum_ovl_bp(qiv, m.exons),
@@ -661,11 +579,9 @@ def run(
                 }
             )
 
-        # UNION matrix across passing transcripts
         per_tx_mats = [_per_nt_region_flags_for_transcript(m, qiv) for m in passing]
         union = _or_region_matrices(per_tx_mats, L=L)
 
-        # read-level region presence stats (union)
         if sum(union["CDS"]) > 0:
             reads_with_any_cds += 1
         if sum(union["UTR3"]) > 0:
@@ -701,25 +617,19 @@ def run(
 
     log("Stage 5/7: write outputs")
     out_df = pd.DataFrame(matrix_rows)
-
-    # Fill missing nt columns (reads can have different lengths)
     nt_cols = [c for c in out_df.columns if c.startswith("nt_")]
     if nt_cols:
         out_df[nt_cols] = out_df[nt_cols].fillna(0).astype(int)
-
     out_df.to_csv(matrix_path, sep="\t", index=False)
-    log(f"Wrote matrix: {matrix_path} (rows={len(out_df):,})")
 
     tx_df = pd.DataFrame(tx_rows)
     tx_df.to_csv(transcripts_path, sep="\t", index=False)
-    log(f"Wrote transcripts: {transcripts_path} (rows={len(tx_df):,})")
 
     log("Stage 6/7: compute stats + write stats TSV")
     read_lens = df["read_len"].astype(int).tolist()
     total_reads = len(df)
     total_nt = int(sum(read_lens))
 
-    # Region coverage totals from matrix
     region_total_ones: dict[str, int] = {}
     region_frac: dict[str, float] = {}
     if not out_df.empty and nt_cols:
@@ -728,22 +638,12 @@ def run(
             region_total_ones[str(region)] = ones
             region_frac[str(region)] = float(ones / total_nt) if total_nt else 0.0
 
-    # Top genes by transcript hits (rows in transcripts.tsv)
-    top_genes: list[tuple[str, int]] = []
-    if not tx_df.empty and "gene_name" in tx_df.columns:
-        gcounts = tx_df["gene_name"].fillna("").astype(str)
-        gcounts = gcounts.where(gcounts != "", tx_df["gene_id"].fillna("").astype(str))
-        top = gcounts.value_counts().head(max(1, int(top_n)))
-        top_genes = list(zip(top.index.tolist(), top.values.tolist()))
-
     stats_rows: list[dict[str, Any]] = []
     stats_rows.append({"metric": "step", "value": "step1_evidence_only"})
     stats_rows.append({"metric": "output_stem", "value": stem})
     stats_rows.append({"metric": "total_reads", "value": total_reads})
     stats_rows.append({"metric": "total_nt", "value": total_nt})
-    stats_rows.append(
-        {"metric": "min_overlap_nt", "value": "None(100% containment)" if min_overlap_nt is None else int(min_overlap_nt)}
-    )
+    stats_rows.append({"metric": "min_overlap_nt", "value": "None(100% containment)" if min_overlap_nt is None else int(min_overlap_nt)})
     stats_rows.append({"metric": "reads_with_any_transcript", "value": reads_with_any_tx})
     stats_rows.append({"metric": "reads_with_no_transcript", "value": total_reads - reads_with_any_tx})
     stats_rows.append({"metric": "mean_transcripts_per_read", "value": round(_safe_mean(tx_count_per_read), 4)})
@@ -763,21 +663,12 @@ def run(
             stats_rows.append({"metric": f"total_ones_{region}", "value": region_total_ones[region]})
             stats_rows.append({"metric": f"fraction_ones_{region}", "value": round(region_frac[region], 6)})
 
-    for i, (g, c) in enumerate(top_genes, start=1):
-        stats_rows.append({"metric": f"top_gene_{i}", "value": g})
-        stats_rows.append({"metric": f"top_gene_{i}_transcript_rows", "value": c})
-
-    stats_df = pd.DataFrame(stats_rows)
-    stats_df.to_csv(stats_path, sep="\t", index=False)
-    log(f"Wrote stats: {stats_path}")
+    pd.DataFrame(stats_rows).to_csv(stats_path, sep="\t", index=False)
 
     if report:
         log("Stage 7/7: report")
         log(f"Reads with >=1 passing transcript: {reads_with_any_tx:,}/{total_reads:,}")
-        log(
-            f"Mean transcripts/read: {_safe_mean(tx_count_per_read):.3f}  "
-            f"(median={_safe_median(tx_count_per_read):.1f}, max={max(tx_count_per_read) if tx_count_per_read else 0})"
-        )
+        log(f"Mean transcripts/read: {_safe_mean(tx_count_per_read):.3f} (median={_safe_median(tx_count_per_read):.1f}, max={max(tx_count_per_read) if tx_count_per_read else 0})")
         if region_frac:
             log("Region coverage fractions (UNION; across all nts):")
             for region in REGIONS:
