@@ -140,6 +140,3 @@ Example:
 
 ---
 
-## More documentation
-
-See `REPORT.md` for a full explanation of steps, decisions, and design rationale.
