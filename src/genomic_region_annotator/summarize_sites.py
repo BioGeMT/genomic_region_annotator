@@ -323,6 +323,34 @@ def run(
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     log(f"Writing: {out_path}")
     out.to_csv(out_path, sep="\t", index=False)
+    # Write compact FINAL table (reduced columns)
+    final_path = str(Path(out_path).with_name(
+        Path(out_path).name.replace("_site_summary.tsv", "_final.tsv")
+    ))
+
+    important_cols = [
+        "id",
+        "chr",
+        "start",
+        "end",
+        "strand",
+        "selected_gene_name",
+        "selected_transcript_id",
+        # relative transcript coordinates
+        "selected_read_start_in_tx_1based",
+        "selected_read_end_in_tx_1based",
+        # region summary
+        "dominant_region_selected",
+        "regions_present_selected",
+        # ambiguity flag
+        "ambiguous_union_vs_selected",
+    ]
+
+    keep = [c for c in important_cols if c in out.columns]
+    final_df = out[keep].copy()
+
+    log(f"Writing compact final table: {final_path}")
+    final_df.to_csv(final_path, sep="\t", index=False)
 
     log(f"Computing stats: {stats_path}")
     _stats_from_summary(out, top_n=top_n).to_csv(stats_path, sep="\t", index=False)
