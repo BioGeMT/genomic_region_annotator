@@ -75,6 +75,25 @@ def _ensure_int(x: Any) -> int:
     return int(x)
 
 
+def _maybe_int(row: pd.Series, col: str) -> Optional[int]:
+    """
+    Return int(row[col]) if the column exists and is not NA; else None.
+    Using None keeps blanks in the TSV if the Step1 transcripts.tsv is missing the column.
+    """
+    if col not in row.index:
+        return None
+    v = row.get(col)
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    try:
+        return int(v)
+    except Exception:
+        return None
+    
+
 def _select_transcript_clash_utr3_first(g: pd.DataFrame) -> pd.Series:
     df = g.copy()
     for c in ["overlap_utr3_bp", "overlap_cds_bp", "overlap_utr5_bp", "overlap_exon_bp", "overlap_tx_bp"]:
@@ -265,6 +284,15 @@ def run(
                 "selected_transcript_id": str(sel.get("transcript_id", "")),
                 "selected_gene_id": str(sel.get("gene_id", "")),
                 "selected_gene_name": str(sel.get("gene_name", "")),
+                # Transcript-relative coordinates for the SELECTED transcript (from Step 1 transcripts.tsv)
+                "selected_tx_start": _maybe_int(sel, "tx_start"),
+                "selected_tx_end": _maybe_int(sel, "tx_end"),
+                "selected_read_start_in_tx_1based": _maybe_int(sel, "read_start_in_tx_1based"),
+                "selected_read_end_in_tx_1based": _maybe_int(sel, "read_end_in_tx_1based"),
+                "selected_overlap_start_genome_1based": _maybe_int(sel, "overlap_start_genome_1based"),
+                "selected_overlap_end_genome_1based": _maybe_int(sel, "overlap_end_genome_1based"),
+                "selected_overlap_start_in_tx_1based": _maybe_int(sel, "overlap_start_in_tx_1based"),
+                "selected_overlap_end_in_tx_1based": _maybe_int(sel, "overlap_end_in_tx_1based"),
                 "dominant_region_selected": dom_sel,
                 "regions_present_selected": _regions_present(sel_bp),
                 "bp_utr3_selected": sel_bp["UTR3"],
@@ -295,6 +323,34 @@ def run(
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     log(f"Writing: {out_path}")
     out.to_csv(out_path, sep="\t", index=False)
+    # Write compact FINAL table (reduced columns)
+    final_path = str(Path(out_path).with_name(
+        Path(out_path).name.replace("_site_summary.tsv", "_final.tsv")
+    ))
+
+    important_cols = [
+        "id",
+        "chr",
+        "start",
+        "end",
+        "strand",
+        "selected_gene_name",
+        "selected_transcript_id",
+        # relative transcript coordinates
+        "selected_read_start_in_tx_1based",
+        "selected_read_end_in_tx_1based",
+        # region summary
+        "dominant_region_selected",
+        "regions_present_selected",
+        # ambiguity flag
+        "ambiguous_union_vs_selected",
+    ]
+
+    keep = [c for c in important_cols if c in out.columns]
+    final_df = out[keep].copy()
+
+    log(f"Writing compact final table: {final_path}")
+    final_df.to_csv(final_path, sep="\t", index=False)
 
     log(f"Computing stats: {stats_path}")
     _stats_from_summary(out, top_n=top_n).to_csv(stats_path, sep="\t", index=False)
