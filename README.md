@@ -58,17 +58,17 @@ Annotate an input TSV and produce step1 outputs:
 genomic-region-annotator annotate \
   --input data/raw/file_with_intervals.tsv \
   --release <version_of_ensembl> \
-  --output data/processed/output_name.tsv
+  --output data/processed/output.tsv
 ```
 
 ### Outputs (written into `data/processed/step1/`)
 
-If your output stem is `output`, you get:
+The output stem is taken from `--output`. If your output path is `data/processed/output.tsv`, the stem is `output` and you get:
 
-- `data/processed/step1/output_annotated_input_with_ids.tsv`
-- `data/processed/step1/output_annotated_matrix.tsv`
-- `data/processed/step1/output_annotated_transcripts.tsv`
-- `data/processed/step1/output_annotated_step1_stats.tsv`
+- `data/processed/step1/output_input_with_ids.tsv`
+- `data/processed/step1/output_matrix.tsv`
+- `data/processed/step1/output_transcripts.tsv`
+- `data/processed/step1/output_step1_stats.tsv`
 
 ### Transcript overlap filter
 
@@ -91,7 +91,8 @@ Run transcript selection + site summary:
 ```bash
 genomic-region-annotator summarize-sites \
   --transcripts data/processed/step1/output_transcripts.tsv \
-  --matrix data/processed/step1/output_annotated_matrix.tsv \
+  --matrix data/processed/step1/output_matrix.tsv \
+  --input-with-ids data/processed/step1/output_input_with_ids.tsv \
   --policy clash_utr3_first \
   --dominance coverage \
   --report
@@ -99,8 +100,13 @@ genomic-region-annotator summarize-sites \
 
 ### Outputs (written into `data/processed/step2/`)
 
+With the default output paths, Step 2 writes:
+
 - `data/processed/step2/output_site_summary.tsv`
+- `data/processed/step2/output_final.tsv`
 - `data/processed/step2/output_step2_stats.tsv`
+
+The compact `*_final.tsv` file contains the most important columns for downstream review; `*_site_summary.tsv` keeps the fuller site-level output.
 
 ---
 
