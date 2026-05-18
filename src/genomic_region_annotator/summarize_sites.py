@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,6 +18,58 @@ def log(msg: str) -> None:
 
 
 PRIORITY = ["UTR3", "CDS", "UTR5", "EXON_OTHER", "INTRON", "INTERGENIC"]
+
+SUMMARY_COLUMNS = [
+    "id",
+    "read_len",
+    "policy",
+    "dominance",
+    "selected_transcript_id",
+    "selected_gene_id",
+    "selected_gene_name",
+    "selected_tx_start",
+    "selected_tx_end",
+    "selected_read_start_in_tx_1based",
+    "selected_read_end_in_tx_1based",
+    "selected_overlap_start_genome_1based",
+    "selected_overlap_end_genome_1based",
+    "selected_overlap_start_in_tx_1based",
+    "selected_overlap_end_in_tx_1based",
+    "dominant_region_selected",
+    "regions_present_selected",
+    "bp_utr3_selected",
+    "bp_cds_selected",
+    "bp_utr5_selected",
+    "bp_exon_other_selected",
+    "bp_intron_selected",
+    "bp_intergenic_selected",
+    "dominant_region_union",
+    "regions_present_union",
+    "bp_utr3_union",
+    "bp_cds_union",
+    "bp_utr5_union",
+    "bp_exon_other_union",
+    "bp_intron_union",
+    "bp_intergenic_union",
+    "ambiguous_union_vs_selected",
+    "n_passing_transcripts",
+]
+
+FINAL_COLUMNS = [
+    "id",
+    "chr",
+    "start",
+    "end",
+    "strand",
+    "selected_gene_name",
+    "selected_transcript_id",
+    "selected_read_start_in_tx_1based",
+    "selected_read_end_in_tx_1based",
+    "dominant_region_selected",
+    "regions_present_selected",
+    "ambiguous_union_vs_selected",
+]
+
 
 
 def _derive_step2_paths(
@@ -240,6 +293,131 @@ def _stats_from_summary(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
+def _append_rows(path: Path, rows: list[dict[str, Any]], columns: list[str], *, header: bool) -> bool:
+    """Append rows to a TSV in bounded chunks, preserving a stable column order."""
+    if not rows:
+        return header
+    mode = "w" if header else "a"
+    pd.DataFrame(rows).reindex(columns=columns).to_csv(path, sep="\t", index=False, mode=mode, header=header)
+    return False
+
+
+def _write_empty(path: Path, columns: list[str]) -> None:
+    pd.DataFrame(columns=columns).to_csv(path, sep="\t", index=False)
+
+
+def _make_summary_row(
+    *,
+    rid: str,
+    g: pd.DataFrame,
+    union_bp: dict[str, int],
+    policy: str,
+    dominance: str,
+) -> dict[str, Any]:
+    """Build one Step 2 summary row using the existing transcript-selection and bp logic."""
+    read_len = int(g["read_len"].iloc[0])
+
+    sel = _select_transcript_clash_utr3_first(g)
+    sel_bp = _bp_from_selected_row(sel, read_len=read_len)
+
+    dom_sel = _dominant_region(sel_bp, dominance=dominance)
+    dom_union = _dominant_region(union_bp, dominance=dominance)
+
+    return {
+        "id": rid,
+        "read_len": read_len,
+        "policy": policy,
+        "dominance": dominance,
+        "selected_transcript_id": str(sel.get("transcript_id", "")),
+        "selected_gene_id": str(sel.get("gene_id", "")),
+        "selected_gene_name": str(sel.get("gene_name", "")),
+        "selected_tx_start": _maybe_int(sel, "tx_start"),
+        "selected_tx_end": _maybe_int(sel, "tx_end"),
+        "selected_read_start_in_tx_1based": _maybe_int(sel, "read_start_in_tx_1based"),
+        "selected_read_end_in_tx_1based": _maybe_int(sel, "read_end_in_tx_1based"),
+        "selected_overlap_start_genome_1based": _maybe_int(sel, "overlap_start_genome_1based"),
+        "selected_overlap_end_genome_1based": _maybe_int(sel, "overlap_end_genome_1based"),
+        "selected_overlap_start_in_tx_1based": _maybe_int(sel, "overlap_start_in_tx_1based"),
+        "selected_overlap_end_in_tx_1based": _maybe_int(sel, "overlap_end_in_tx_1based"),
+        "dominant_region_selected": dom_sel,
+        "regions_present_selected": _regions_present(sel_bp),
+        "bp_utr3_selected": sel_bp["UTR3"],
+        "bp_cds_selected": sel_bp["CDS"],
+        "bp_utr5_selected": sel_bp["UTR5"],
+        "bp_exon_other_selected": sel_bp["EXON_OTHER"],
+        "bp_intron_selected": sel_bp["INTRON"],
+        "bp_intergenic_selected": sel_bp["INTERGENIC"],
+        "dominant_region_union": dom_union,
+        "regions_present_union": _regions_present(union_bp),
+        "bp_utr3_union": union_bp["UTR3"],
+        "bp_cds_union": union_bp["CDS"],
+        "bp_utr5_union": union_bp["UTR5"],
+        "bp_exon_other_union": union_bp["EXON_OTHER"],
+        "bp_intron_union": union_bp["INTRON"],
+        "bp_intergenic_union": union_bp["INTERGENIC"],
+        "ambiguous_union_vs_selected": 1 if dom_union != dom_sel else 0,
+        "n_passing_transcripts": int(len(g)),
+    }
+
+
+def _init_step2_counters() -> tuple[dict[str, Counter], dict[str, int]]:
+    counters = {
+        "dominant_region_selected": Counter(),
+        "dominant_region_union": Counter(),
+        "regions_present_selected": Counter(),
+        "regions_present_union": Counter(),
+        "selected_gene_name": Counter(),
+        "selected_transcript_id": Counter(),
+    }
+    totals = {"n_reads": 0, "ambiguous_union_vs_selected": 0}
+    return counters, totals
+
+
+def _update_step2_counters(row: dict[str, Any], counters: dict[str, Counter], totals: dict[str, int]) -> None:
+    totals["n_reads"] += 1
+    totals["ambiguous_union_vs_selected"] += int(row.get("ambiguous_union_vs_selected", 0) or 0)
+
+    for col in [
+        "dominant_region_selected",
+        "dominant_region_union",
+        "regions_present_selected",
+        "regions_present_union",
+        "selected_gene_name",
+        "selected_transcript_id",
+    ]:
+        value = row.get(col)
+        counters[col]["NA" if value is None or pd.isna(value) else str(value)] += 1
+
+
+def _stats_from_counters(counters: dict[str, Counter], totals: dict[str, int], top_n: int = 20) -> pd.DataFrame:
+    n_reads = int(totals.get("n_reads", 0))
+    amb = int(totals.get("ambiguous_union_vs_selected", 0))
+
+    rows: list[dict[str, Any]] = []
+    rows.append({"metric": "step", "value": "step2_transcript_selection"})
+    rows.append({"metric": "n_reads", "value": n_reads})
+    rows.append({"metric": "n_ambiguous_union_vs_selected", "value": amb})
+    rows.append({"metric": "fraction_ambiguous_union_vs_selected", "value": round(amb / n_reads, 6) if n_reads else 0.0})
+
+    for col in ["dominant_region_selected", "dominant_region_union"]:
+        for k, v in counters[col].most_common():
+            rows.append({"metric": f"{col}_count__{k}", "value": int(v)})
+            rows.append({"metric": f"{col}_fraction__{k}", "value": round(int(v) / n_reads, 6) if n_reads else 0.0})
+
+    for col in ["regions_present_selected", "regions_present_union"]:
+        for i, (k, v) in enumerate(counters[col].most_common(max(1, int(top_n))), start=1):
+            rows.append({"metric": f"top_{col}_{i}", "value": k})
+            rows.append({"metric": f"top_{col}_{i}_count", "value": int(v)})
+
+    for col in ["selected_gene_name", "selected_transcript_id"]:
+        for i, (k, v) in enumerate(counters[col].most_common(max(1, int(top_n))), start=1):
+            rows.append({"metric": f"top_{col}_{i}", "value": k})
+            rows.append({"metric": f"top_{col}_{i}_count", "value": int(v)})
+
+    return pd.DataFrame(rows)
+
+
 def run(
     *,
     transcripts_tsv: str,
@@ -258,6 +436,8 @@ def run(
         raise ValueError("Currently supported policy: clash_utr3_first")
 
     out_path, stats_path, input_ids_path = _derive_step2_paths(transcripts_tsv, output_tsv, stats_out, input_with_ids_tsv)
+    out_path_obj = Path(out_path)
+    final_path_obj = out_path_obj.with_name(out_path_obj.name.replace("_site_summary.tsv", "_final.tsv"))
 
     log(f"Reading transcripts: {transcripts_tsv}")
     tx = pd.read_csv(transcripts_tsv, sep="\t", dtype={"id": "string"})
@@ -269,13 +449,19 @@ def run(
     if mx.empty:
         raise ValueError("matrix_tsv is empty.")
 
-    input_df: Optional[pd.DataFrame] = None
+    input_by_id: dict[str, dict[str, Any]] = {}
+    original_cols: list[str] = []
     if input_ids_path and Path(input_ids_path).exists():
         log(f"Reading input_with_ids (for original columns): {input_ids_path}")
         input_df = pd.read_csv(input_ids_path, sep="\t", dtype={"id": "string"})
+        original_cols = [c for c in input_df.columns if c not in SUMMARY_COLUMNS]
+        input_by_id = input_df.set_index("id", drop=False)[original_cols].to_dict(orient="index")
     else:
         if input_ids_path:
             log(f"input_with_ids not found (skipping merge): {input_ids_path}")
+
+    site_columns = ["id"] + [c for c in original_cols if c != "id"] + [c for c in SUMMARY_COLUMNS if c != "id"]
+    final_columns = [c for c in FINAL_COLUMNS if c in site_columns]
 
     log("Precomputing union bp from matrix...")
     read_len_by_id = tx.groupby("id", sort=False)["read_len"].first().astype(int).to_dict()
@@ -284,105 +470,77 @@ def run(
     log("Selecting transcript per read and computing site summaries...")
     t0 = time.time()
 
-    rows: list[dict[str, Any]] = []
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
+    out_buffer: list[dict[str, Any]] = []
+    final_buffer: list[dict[str, Any]] = []
+    out_header = True
+    final_header = True
+    wrote_out = False
+    wrote_final = False
+    write_chunk_size = 10_000
+
+    counters, totals = _init_step2_counters()
+
     for rid, g in tx.groupby("id", sort=False):
         rid_str = str(rid)
-        read_len = int(g["read_len"].iloc[0])
-
-        sel = _select_transcript_clash_utr3_first(g)
-        sel_bp = _bp_from_selected_row(sel, read_len=read_len)
-
         union_bp = union_by_id.get(rid_str)
         if union_bp is None:
             raise ValueError(f"Matrix missing id={rid_str} present in transcripts.")
 
-        dom_sel = _dominant_region(sel_bp, dominance=dominance)
-        dom_union = _dominant_region(union_bp, dominance=dominance)
-
-        rows.append(
-            {
-                "id": rid_str,
-                "read_len": read_len,
-                "policy": policy,
-                "dominance": dominance,
-                "selected_transcript_id": str(sel.get("transcript_id", "")),
-                "selected_gene_id": str(sel.get("gene_id", "")),
-                "selected_gene_name": str(sel.get("gene_name", "")),
-                "selected_tx_start": _maybe_int(sel, "tx_start"),
-                "selected_tx_end": _maybe_int(sel, "tx_end"),
-                "selected_read_start_in_tx_1based": _maybe_int(sel, "read_start_in_tx_1based"),
-                "selected_read_end_in_tx_1based": _maybe_int(sel, "read_end_in_tx_1based"),
-                "selected_overlap_start_genome_1based": _maybe_int(sel, "overlap_start_genome_1based"),
-                "selected_overlap_end_genome_1based": _maybe_int(sel, "overlap_end_genome_1based"),
-                "selected_overlap_start_in_tx_1based": _maybe_int(sel, "overlap_start_in_tx_1based"),
-                "selected_overlap_end_in_tx_1based": _maybe_int(sel, "overlap_end_in_tx_1based"),
-                "dominant_region_selected": dom_sel,
-                "regions_present_selected": _regions_present(sel_bp),
-                "bp_utr3_selected": sel_bp["UTR3"],
-                "bp_cds_selected": sel_bp["CDS"],
-                "bp_utr5_selected": sel_bp["UTR5"],
-                "bp_exon_other_selected": sel_bp["EXON_OTHER"],
-                "bp_intron_selected": sel_bp["INTRON"],
-                "bp_intergenic_selected": sel_bp["INTERGENIC"],
-                "dominant_region_union": dom_union,
-                "regions_present_union": _regions_present(union_bp),
-                "bp_utr3_union": union_bp["UTR3"],
-                "bp_cds_union": union_bp["CDS"],
-                "bp_utr5_union": union_bp["UTR5"],
-                "bp_exon_other_union": union_bp["EXON_OTHER"],
-                "bp_intron_union": union_bp["INTRON"],
-                "bp_intergenic_union": union_bp["INTERGENIC"],
-                "ambiguous_union_vs_selected": 1 if dom_union != dom_sel else 0,
-                "n_passing_transcripts": int(len(g)),
-            }
+        row = _make_summary_row(
+            rid=rid_str,
+            g=g,
+            union_bp=union_bp,
+            policy=policy,
+            dominance=dominance,
         )
 
-    out = pd.DataFrame(rows).sort_values("id", kind="mergesort")
+        if input_by_id:
+            merged = {"id": rid_str}
+            merged.update(input_by_id.get(rid_str, {}))
+            merged.update(row)
+            row = merged
 
-    if input_df is not None and not input_df.empty:
-        keep = [c for c in input_df.columns if c not in out.columns]
-        out = input_df[["id"] + keep].merge(out, on="id", how="right")
+        _update_step2_counters(row, counters, totals)
 
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        out_buffer.append(row)
+        final_buffer.append({c: row.get(c) for c in final_columns})
+
+        if len(out_buffer) >= write_chunk_size:
+            out_header = _append_rows(out_path_obj, out_buffer, site_columns, header=out_header)
+            final_header = _append_rows(final_path_obj, final_buffer, final_columns, header=final_header)
+            wrote_out = True
+            wrote_final = True
+            out_buffer = []
+            final_buffer = []
+
+    if out_buffer:
+        out_header = _append_rows(out_path_obj, out_buffer, site_columns, header=out_header)
+        final_header = _append_rows(final_path_obj, final_buffer, final_columns, header=final_header)
+        wrote_out = True
+        wrote_final = True
+
+    if not wrote_out:
+        _write_empty(out_path_obj, site_columns)
+    if not wrote_final:
+        _write_empty(final_path_obj, final_columns)
+
     log(f"Writing: {out_path}")
-    out.to_csv(out_path, sep="\t", index=False)
-    final_path = str(Path(out_path).with_name(
-        Path(out_path).name.replace("_site_summary.tsv", "_final.tsv")
-    ))
-
-    important_cols = [
-        "id",
-        "chr",
-        "start",
-        "end",
-        "strand",
-        "selected_gene_name",
-        "selected_transcript_id",
-        "selected_read_start_in_tx_1based",
-        "selected_read_end_in_tx_1based",
-        "dominant_region_selected",
-        "regions_present_selected",
-        "ambiguous_union_vs_selected",
-    ]
-
-    keep = [c for c in important_cols if c in out.columns]
-    final_df = out[keep].copy()
-
-    log(f"Writing compact final table: {final_path}")
-    final_df.to_csv(final_path, sep="\t", index=False)
+    log(f"Writing compact final table: {final_path_obj}")
 
     log(f"Computing stats: {stats_path}")
-    _stats_from_summary(out, top_n=top_n).to_csv(stats_path, sep="\t", index=False)
+    _stats_from_counters(counters, totals, top_n=top_n).to_csv(stats_path, sep="\t", index=False)
 
-    log(f"Done. Wrote {len(out):,} rows in {time.time()-t0:.1f}s")
+    n_written = int(totals["n_reads"])
+    log(f"Done. Wrote {n_written:,} rows in {time.time()-t0:.1f}s")
 
     if report:
         log("Report (Step 2)")
-        vc = out["dominant_region_selected"].value_counts() if "dominant_region_selected" in out.columns else {}
+        vc = counters["dominant_region_selected"]
         if len(vc):
             log("Top dominant_region_selected:")
-            for k, v in vc.head(10).items():
+            for k, v in vc.most_common(10):
                 log(f"  {k}: {v}")
-        if "ambiguous_union_vs_selected" in out.columns:
-            amb = int(out["ambiguous_union_vs_selected"].sum())
-            log(f"Ambiguous union vs selected: {amb}/{len(out)} ({(amb/len(out)):.3f})")
+        amb = int(totals["ambiguous_union_vs_selected"])
+        log(f"Ambiguous union vs selected: {amb}/{n_written} ({(amb/n_written):.3f})" if n_written else "Ambiguous union vs selected: 0/0 (0.000)")
