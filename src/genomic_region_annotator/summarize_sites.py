@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import pandas as pd
 
@@ -71,7 +71,6 @@ FINAL_COLUMNS = [
 ]
 
 
-
 def _derive_step2_paths(
     transcripts_tsv: str,
     output_path: Optional[str],
@@ -79,8 +78,7 @@ def _derive_step2_paths(
     input_with_ids_tsv: Optional[str],
 ) -> tuple[str, str, Optional[str]]:
     txp = Path(transcripts_tsv)
-    name = txp.name
-    stem = name.replace("_transcripts.tsv", "") if name.endswith("_transcripts.tsv") else txp.stem
+    stem = txp.name.replace("_transcripts.tsv", "") if txp.name.endswith("_transcripts.tsv") else txp.stem
 
     if txp.parent.name == "step1":
         step2_dir = txp.parent.parent / "step2"
@@ -90,10 +88,8 @@ def _derive_step2_paths(
         inferred_input = str(txp.parent / f"{stem}_input_with_ids.tsv")
 
     step2_dir.mkdir(parents=True, exist_ok=True)
-
     out_default = str(step2_dir / f"{stem}_site_summary.tsv")
     stats_default = str(step2_dir / f"{stem}_step2_stats.tsv")
-
     return output_path or out_default, stats_out or stats_default, (input_with_ids_tsv or inferred_input)
 
 
@@ -129,10 +125,6 @@ def _ensure_int(x: Any) -> int:
 
 
 def _maybe_int(row: pd.Series, col: str) -> Optional[int]:
-    """
-    Return int(row[col]) if the column exists and is not NA; else None.
-    Using None keeps blanks in the TSV if the Step1 transcripts.tsv is missing the column.
-    """
     if col not in row.index:
         return None
     v = row.get(col)
@@ -156,13 +148,9 @@ def _select_transcript_clash_utr3_first(g: pd.DataFrame) -> pd.Series:
         df["overlap_exon_bp"] - df["overlap_cds_bp"] - df["overlap_utr3_bp"] - df["overlap_utr5_bp"]
     ).clip(lower=0)
     df["intron_bp"] = (df["overlap_tx_bp"] - df["overlap_exon_bp"]).clip(lower=0)
+    df["contained_100pct"] = df["contained_100pct"].fillna(0).astype(int) if "contained_100pct" in df.columns else 0
 
-    if "contained_100pct" in df.columns:
-        df["contained_100pct"] = df["contained_100pct"].fillna(0).astype(int)
-    else:
-        df["contained_100pct"] = 0
-
-    df = df.sort_values(
+    return df.sort_values(
         by=[
             "overlap_utr3_bp",
             "overlap_cds_bp",
@@ -176,8 +164,7 @@ def _select_transcript_clash_utr3_first(g: pd.DataFrame) -> pd.Series:
         ],
         ascending=[False, False, False, False, False, False, False, False, True],
         kind="mergesort",
-    )
-    return df.iloc[0]
+    ).iloc[0]
 
 
 def _bp_from_selected_row(row: pd.Series, read_len: int) -> dict[str, int]:
@@ -189,14 +176,13 @@ def _bp_from_selected_row(row: pd.Series, read_len: int) -> dict[str, int]:
 
     exon_other = max(0, exon - cds - utr3 - utr5)
     intron = max(0, tx - exon)
-
     covered = min(read_len, exon + intron)
     intergenic = max(0, read_len - covered)
-
     return {"UTR3": utr3, "CDS": cds, "UTR5": utr5, "EXON_OTHER": exon_other, "INTRON": intron, "INTERGENIC": intergenic}
 
 
 def _bp_from_matrix_rows(g: pd.DataFrame, read_len: int, nt_cols: list[str]) -> dict[str, int]:
+    """Reference implementation for one id, kept for parity/debugging."""
     if not nt_cols:
         raise ValueError("Matrix TSV is missing nt_* columns.")
     gg = g.copy()
@@ -221,29 +207,22 @@ def _bp_from_matrix_rows(g: pd.DataFrame, read_len: int, nt_cols: list[str]) -> 
     intron_v = row_vec("INTRON")
     intergenic_v = row_vec("INTERGENIC")
 
-    utr3 = int(utr3_v.sum())
-    cds = int(cds_v.sum())
-    utr5 = int(utr5_v.sum())
-
     exon = int(exon_v.sum()) if exon_v is not None else 0
-    exon_other = int(((exon_v == 1) & (cds_v == 0) & (utr3_v == 0) & (utr5_v == 0)).sum()) if exon_v is not None else 0
     intron = int(intron_v.sum()) if intron_v is not None else 0
     intergenic = int(intergenic_v.sum()) if intergenic_v is not None else 0
-
     covered = min(read_len, exon + intron)
-    intergenic = max(intergenic, read_len - covered)
 
-    return {"UTR3": utr3, "CDS": cds, "UTR5": utr5, "EXON_OTHER": exon_other, "INTRON": intron, "INTERGENIC": intergenic}
+    return {
+        "UTR3": int(utr3_v.sum()),
+        "CDS": int(cds_v.sum()),
+        "UTR5": int(utr5_v.sum()),
+        "EXON_OTHER": int(((exon_v == 1) & (cds_v == 0) & (utr3_v == 0) & (utr5_v == 0)).sum()) if exon_v is not None else 0,
+        "INTRON": intron,
+        "INTERGENIC": max(intergenic, read_len - covered),
+    }
 
 
-def _matrix_region_array(
-    block: pd.DataFrame,
-    *,
-    region: str,
-    ids: pd.Index,
-    nt_cols: list[str],
-) -> pd.DataFrame:
-    """Return one clipped per-id, per-nt matrix for a region inside an ID-aligned block."""
+def _matrix_region_array(block: pd.DataFrame, *, region: str, ids: pd.Index, nt_cols: list[str]) -> pd.DataFrame:
     r = block.loc[block["region"] == region, ["id"] + nt_cols]
     if r.empty:
         return pd.DataFrame(0, index=ids, columns=nt_cols, dtype="int8")
@@ -254,116 +233,104 @@ def _matrix_region_array(
     return out.reindex(ids, fill_value=0).astype("int8")
 
 
-def _iter_id_aligned_matrix_chunks(mx: pd.DataFrame, target_rows: int = 60_000):
-    """Yield matrix chunks without splitting an id across chunks.
+def _iter_id_aligned_matrix_chunks_from_file(
+    matrix_tsv: str,
+    *,
+    chunksize: int = 60_000,
+) -> Iterator[pd.DataFrame]:
+    """Yield matrix chunks from disk without splitting an id across chunks."""
+    reader = pd.read_csv(matrix_tsv, sep="\t", dtype={"id": "string", "region": "string"}, chunksize=max(1, int(chunksize)))
+    carry = pd.DataFrame()
+    saw_rows = False
 
-    Step 1 writes the matrix in id order, with all region rows for one id together.
-    Keeping ids intact lets us vectorize region calculations per chunk while
-    preserving the original per-id logic.
-    """
-    n = len(mx)
-    start = 0
-    while start < n:
-        end = min(start + target_rows, n)
-        if end < n:
-            last_id = mx["id"].iloc[end - 1]
-            while end < n and mx["id"].iloc[end] == last_id:
-                end += 1
-        yield mx.iloc[start:end]
-        start = end
+    for raw_chunk in reader:
+        saw_rows = True
+        chunk = pd.concat([carry, raw_chunk], ignore_index=True) if not carry.empty else raw_chunk
+        chunk["id"] = chunk["id"].astype(str)
+
+        last_id = chunk["id"].iloc[-1]
+        tail_mask = chunk["id"] == last_id
+        process = chunk.loc[~tail_mask].copy()
+        carry = chunk.loc[tail_mask].copy()
+
+        if not process.empty:
+            yield process
+
+    if not saw_rows:
+        raise ValueError("matrix_tsv is empty.")
+    if not carry.empty:
+        yield carry
 
 
-def _precompute_union_bp_from_matrix(mx: pd.DataFrame, read_len_by_id: dict[str, int]) -> dict[str, dict[str, int]]:
-    """Precompute UNION bp summaries from the Step 1 matrix.
+def _summarize_matrix_block(block: pd.DataFrame, read_len_by_id: dict[str, int], nt_cols: list[str]) -> dict[str, dict[str, int]]:
+    ids = pd.Index(pd.unique(block["id"].astype(str)), name="id")
 
-    This is equivalent to applying _bp_from_matrix_rows per id, but it works on
-    ID-aligned chunks and vectorizes the per-nt region operations inside each
-    chunk. It keeps the exact EXON_OTHER definition:
-    EXON positions where CDS, UTR3, and UTR5 are all absent.
-    """
-    nt_cols = [c for c in mx.columns if c.startswith("nt_")]
-    if not nt_cols:
-        raise ValueError("Matrix TSV is missing nt_* columns.")
+    utr3 = _matrix_region_array(block, region="UTR3", ids=ids, nt_cols=nt_cols)
+    cds = _matrix_region_array(block, region="CDS", ids=ids, nt_cols=nt_cols)
+    utr5 = _matrix_region_array(block, region="UTR5", ids=ids, nt_cols=nt_cols)
+    exon = _matrix_region_array(block, region="EXON", ids=ids, nt_cols=nt_cols)
+    intron = _matrix_region_array(block, region="INTRON", ids=ids, nt_cols=nt_cols)
+    intergenic = _matrix_region_array(block, region="INTERGENIC", ids=ids, nt_cols=nt_cols)
 
+    utr3_bp = utr3.sum(axis=1).astype(int)
+    cds_bp = cds.sum(axis=1).astype(int)
+    utr5_bp = utr5.sum(axis=1).astype(int)
+    exon_bp = exon.sum(axis=1).astype(int)
+    intron_bp = intron.sum(axis=1).astype(int)
+    intergenic_bp = intergenic.sum(axis=1).astype(int)
+    exon_other_bp = ((exon == 1) & (cds == 0) & (utr3 == 0) & (utr5 == 0)).sum(axis=1).astype(int)
+
+    out: dict[str, dict[str, int]] = {}
+    for rid in ids:
+        rid_str = str(rid)
+        read_len = read_len_by_id.get(rid_str)
+        if read_len is None:
+            g = block.loc[block["id"].astype(str) == rid_str]
+            if "read_len" not in g.columns or g["read_len"].empty:
+                raise ValueError(f"Cannot determine read_len for matrix id={rid_str}.")
+            read_len = int(g["read_len"].iloc[0])
+
+        covered = min(int(read_len), int(exon_bp.loc[rid]) + int(intron_bp.loc[rid]))
+        out[rid_str] = {
+            "UTR3": int(utr3_bp.loc[rid]),
+            "CDS": int(cds_bp.loc[rid]),
+            "UTR5": int(utr5_bp.loc[rid]),
+            "EXON_OTHER": int(exon_other_bp.loc[rid]),
+            "INTRON": int(intron_bp.loc[rid]),
+            "INTERGENIC": max(int(intergenic_bp.loc[rid]), int(read_len) - covered),
+        }
+    return out
+
+
+def _precompute_union_bp_from_matrix_file(matrix_tsv: str, read_len_by_id: dict[str, int]) -> dict[str, dict[str, int]]:
     union_by_id: dict[str, dict[str, int]] = {}
+    nt_cols: Optional[list[str]] = None
 
-    for block in _iter_id_aligned_matrix_chunks(mx):
-        ids = pd.Index(pd.unique(block["id"].astype(str)), name="id")
+    for block in _iter_id_aligned_matrix_chunks_from_file(matrix_tsv):
+        if nt_cols is None:
+            nt_cols = [c for c in block.columns if c.startswith("nt_")]
+            if not nt_cols:
+                raise ValueError("Matrix TSV is missing nt_* columns.")
+        union_by_id.update(_summarize_matrix_block(block, read_len_by_id=read_len_by_id, nt_cols=nt_cols))
 
-        utr3 = _matrix_region_array(block, region="UTR3", ids=ids, nt_cols=nt_cols)
-        cds = _matrix_region_array(block, region="CDS", ids=ids, nt_cols=nt_cols)
-        utr5 = _matrix_region_array(block, region="UTR5", ids=ids, nt_cols=nt_cols)
-        exon = _matrix_region_array(block, region="EXON", ids=ids, nt_cols=nt_cols)
-        intron = _matrix_region_array(block, region="INTRON", ids=ids, nt_cols=nt_cols)
-        intergenic = _matrix_region_array(block, region="INTERGENIC", ids=ids, nt_cols=nt_cols)
-
-        utr3_bp = utr3.sum(axis=1).astype(int)
-        cds_bp = cds.sum(axis=1).astype(int)
-        utr5_bp = utr5.sum(axis=1).astype(int)
-        exon_bp = exon.sum(axis=1).astype(int)
-        intron_bp = intron.sum(axis=1).astype(int)
-        intergenic_bp = intergenic.sum(axis=1).astype(int)
-
-        exon_other_bp = ((exon == 1) & (cds == 0) & (utr3 == 0) & (utr5 == 0)).sum(axis=1).astype(int)
-
-        for rid in ids:
-            read_len = read_len_by_id.get(str(rid))
-            if read_len is None:
-                g = block.loc[block["id"].astype(str) == str(rid)]
-                if "read_len" not in g.columns or g["read_len"].empty:
-                    raise ValueError(f"Cannot determine read_len for matrix id={rid}.")
-                read_len = int(g["read_len"].iloc[0])
-
-            covered = min(int(read_len), int(exon_bp.loc[rid]) + int(intron_bp.loc[rid]))
-            union_by_id[str(rid)] = {
-                "UTR3": int(utr3_bp.loc[rid]),
-                "CDS": int(cds_bp.loc[rid]),
-                "UTR5": int(utr5_bp.loc[rid]),
-                "EXON_OTHER": int(exon_other_bp.loc[rid]),
-                "INTRON": int(intron_bp.loc[rid]),
-                "INTERGENIC": max(int(intergenic_bp.loc[rid]), int(read_len) - covered),
-            }
-
+    if nt_cols is None:
+        raise ValueError("matrix_tsv is empty.")
     return union_by_id
 
 
-def _stats_from_summary(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    rows.append({"metric": "step", "value": "step2_transcript_selection"})
-    rows.append({"metric": "n_reads", "value": int(len(df))})
-
-    if "ambiguous_union_vs_selected" in df.columns:
-        amb = int(df["ambiguous_union_vs_selected"].fillna(0).astype(int).sum())
-        rows.append({"metric": "n_ambiguous_union_vs_selected", "value": amb})
-        rows.append({"metric": "fraction_ambiguous_union_vs_selected", "value": round(amb / len(df), 6) if len(df) else 0.0})
-
-    for col in ["dominant_region_selected", "dominant_region_union"]:
-        if col in df.columns:
-            vc = df[col].fillna("NA").astype(str).value_counts()
-            for k, v in vc.items():
-                rows.append({"metric": f"{col}_count__{k}", "value": int(v)})
-                rows.append({"metric": f"{col}_fraction__{k}", "value": round(int(v) / len(df), 6) if len(df) else 0.0})
-
-    for col in ["regions_present_selected", "regions_present_union"]:
-        if col in df.columns:
-            vc = df[col].fillna("NA").astype(str).value_counts().head(max(1, int(top_n)))
-            for i, (k, v) in enumerate(vc.items(), start=1):
-                rows.append({"metric": f"top_{col}_{i}", "value": k})
-                rows.append({"metric": f"top_{col}_{i}_count", "value": int(v)})
-
-    for col in ["selected_gene_name", "selected_transcript_id"]:
-        if col in df.columns:
-            vc = df[col].fillna("NA").astype(str).value_counts().head(max(1, int(top_n)))
-            for i, (k, v) in enumerate(vc.items(), start=1):
-                rows.append({"metric": f"top_{col}_{i}", "value": k})
-                rows.append({"metric": f"top_{col}_{i}_count", "value": int(v)})
-
-    return pd.DataFrame(rows)
-
+def _precompute_union_bp_from_matrix(mx: pd.DataFrame, read_len_by_id: dict[str, int]) -> dict[str, dict[str, int]]:
+    """In-memory compatibility wrapper for tests and small callers."""
+    nt_cols = [c for c in mx.columns if c.startswith("nt_")]
+    if not nt_cols:
+        raise ValueError("Matrix TSV is missing nt_* columns.")
+    union_by_id: dict[str, dict[str, int]] = {}
+    for block_start in range(0, len(mx), 60_000):
+        block = mx.iloc[block_start : block_start + 60_000].copy()
+        union_by_id.update(_summarize_matrix_block(block, read_len_by_id=read_len_by_id, nt_cols=nt_cols))
+    return union_by_id
 
 
 def _append_rows(path: Path, rows: list[dict[str, Any]], columns: list[str], *, header: bool) -> bool:
-    """Append rows to a TSV in bounded chunks, preserving a stable column order."""
     if not rows:
         return header
     mode = "w" if header else "a"
@@ -375,20 +342,10 @@ def _write_empty(path: Path, columns: list[str]) -> None:
     pd.DataFrame(columns=columns).to_csv(path, sep="\t", index=False)
 
 
-def _make_summary_row(
-    *,
-    rid: str,
-    g: pd.DataFrame,
-    union_bp: dict[str, int],
-    policy: str,
-    dominance: str,
-) -> dict[str, Any]:
-    """Build one Step 2 summary row using the existing transcript-selection and bp logic."""
+def _make_summary_row(*, rid: str, g: pd.DataFrame, union_bp: dict[str, int], policy: str, dominance: str) -> dict[str, Any]:
     read_len = int(g["read_len"].iloc[0])
-
     sel = _select_transcript_clash_utr3_first(g)
     sel_bp = _bp_from_selected_row(sel, read_len=read_len)
-
     dom_sel = _dominant_region(sel_bp, dominance=dominance)
     dom_union = _dominant_region(union_bp, dominance=dominance)
 
@@ -445,15 +402,7 @@ def _init_step2_counters() -> tuple[dict[str, Counter], dict[str, int]]:
 def _update_step2_counters(row: dict[str, Any], counters: dict[str, Counter], totals: dict[str, int]) -> None:
     totals["n_reads"] += 1
     totals["ambiguous_union_vs_selected"] += int(row.get("ambiguous_union_vs_selected", 0) or 0)
-
-    for col in [
-        "dominant_region_selected",
-        "dominant_region_union",
-        "regions_present_selected",
-        "regions_present_union",
-        "selected_gene_name",
-        "selected_transcript_id",
-    ]:
+    for col in counters:
         value = row.get(col)
         counters[col]["NA" if value is None or pd.isna(value) else str(value)] += 1
 
@@ -461,28 +410,22 @@ def _update_step2_counters(row: dict[str, Any], counters: dict[str, Counter], to
 def _stats_from_counters(counters: dict[str, Counter], totals: dict[str, int], top_n: int = 20) -> pd.DataFrame:
     n_reads = int(totals.get("n_reads", 0))
     amb = int(totals.get("ambiguous_union_vs_selected", 0))
-
-    rows: list[dict[str, Any]] = []
-    rows.append({"metric": "step", "value": "step2_transcript_selection"})
-    rows.append({"metric": "n_reads", "value": n_reads})
-    rows.append({"metric": "n_ambiguous_union_vs_selected", "value": amb})
-    rows.append({"metric": "fraction_ambiguous_union_vs_selected", "value": round(amb / n_reads, 6) if n_reads else 0.0})
+    rows: list[dict[str, Any]] = [
+        {"metric": "step", "value": "step2_transcript_selection"},
+        {"metric": "n_reads", "value": n_reads},
+        {"metric": "n_ambiguous_union_vs_selected", "value": amb},
+        {"metric": "fraction_ambiguous_union_vs_selected", "value": round(amb / n_reads, 6) if n_reads else 0.0},
+    ]
 
     for col in ["dominant_region_selected", "dominant_region_union"]:
         for k, v in counters[col].most_common():
             rows.append({"metric": f"{col}_count__{k}", "value": int(v)})
             rows.append({"metric": f"{col}_fraction__{k}", "value": round(int(v) / n_reads, 6) if n_reads else 0.0})
 
-    for col in ["regions_present_selected", "regions_present_union"]:
+    for col in ["regions_present_selected", "regions_present_union", "selected_gene_name", "selected_transcript_id"]:
         for i, (k, v) in enumerate(counters[col].most_common(max(1, int(top_n))), start=1):
             rows.append({"metric": f"top_{col}_{i}", "value": k})
             rows.append({"metric": f"top_{col}_{i}_count", "value": int(v)})
-
-    for col in ["selected_gene_name", "selected_transcript_id"]:
-        for i, (k, v) in enumerate(counters[col].most_common(max(1, int(top_n))), start=1):
-            rows.append({"metric": f"top_{col}_{i}", "value": k})
-            rows.append({"metric": f"top_{col}_{i}_count", "value": int(v)})
-
     return pd.DataFrame(rows)
 
 
@@ -512,11 +455,6 @@ def run(
     if tx.empty:
         raise ValueError("transcripts_tsv is empty (no passing transcripts).")
 
-    log(f"Reading matrix (UNION composition): {matrix_tsv}")
-    mx = pd.read_csv(matrix_tsv, sep="\t", dtype={"id": "string", "region": "string"})
-    if mx.empty:
-        raise ValueError("matrix_tsv is empty.")
-
     input_by_id: dict[str, dict[str, Any]] = {}
     original_cols: list[str] = []
     if input_ids_path and Path(input_ids_path).exists():
@@ -531,13 +469,13 @@ def run(
     site_columns = ["id"] + [c for c in original_cols if c != "id"] + [c for c in SUMMARY_COLUMNS if c != "id"]
     final_columns = [c for c in FINAL_COLUMNS if c in site_columns]
 
+    log(f"Reading matrix (UNION composition): {matrix_tsv}")
     log("Precomputing union bp from matrix...")
     read_len_by_id = tx.groupby("id", sort=False)["read_len"].first().astype(int).to_dict()
-    union_by_id = _precompute_union_bp_from_matrix(mx, read_len_by_id=read_len_by_id)
+    union_by_id = _precompute_union_bp_from_matrix_file(matrix_tsv, read_len_by_id=read_len_by_id)
 
     log("Selecting transcript per read and computing site summaries...")
     t0 = time.time()
-
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
     out_buffer: list[dict[str, Any]] = []
@@ -547,7 +485,6 @@ def run(
     wrote_out = False
     wrote_final = False
     write_chunk_size = 10_000
-
     counters, totals = _init_step2_counters()
 
     for rid, g in tx.groupby("id", sort=False):
@@ -556,14 +493,7 @@ def run(
         if union_bp is None:
             raise ValueError(f"Matrix missing id={rid_str} present in transcripts.")
 
-        row = _make_summary_row(
-            rid=rid_str,
-            g=g,
-            union_bp=union_bp,
-            policy=policy,
-            dominance=dominance,
-        )
-
+        row = _make_summary_row(rid=rid_str, g=g, union_bp=union_bp, policy=policy, dominance=dominance)
         if input_by_id:
             merged = {"id": rid_str}
             merged.update(input_by_id.get(rid_str, {}))
@@ -571,7 +501,6 @@ def run(
             row = merged
 
         _update_step2_counters(row, counters, totals)
-
         out_buffer.append(row)
         final_buffer.append({c: row.get(c) for c in final_columns})
 
@@ -596,7 +525,6 @@ def run(
 
     log(f"Writing: {out_path}")
     log(f"Writing compact final table: {final_path_obj}")
-
     log(f"Computing stats: {stats_path}")
     _stats_from_counters(counters, totals, top_n=top_n).to_csv(stats_path, sep="\t", index=False)
 
