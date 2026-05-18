@@ -70,6 +70,16 @@ The output stem is taken from `--output`. If your output path is `data/processed
 - `data/processed/step1/output_transcripts.tsv`
 - `data/processed/step1/output_step1_stats.tsv`
 
+### IDs and row tracking
+
+Step 1 adds a stable zero-padded `id` column to every input row and writes the full input table to `*_input_with_ids.tsv`. This `id` is the join key used by all downstream files:
+
+- `*_input_with_ids.tsv` has one row per original input interval.
+- `*_matrix.tsv` has per-region, per-nucleotide union evidence keyed by `id`.
+- `*_transcripts.tsv` has one row per passing transcript keyed by `id`; an input interval with no passing transcript will not have transcript rows.
+
+If the input already contains an `id` column, it is preserved as `original_id`, and the pipeline-generated `id` is still used internally for stable row tracking.
+
 ### Transcript overlap filter
 
 By default, Step 1 keeps only transcripts where the read is **100% contained** inside the transcript span.
@@ -107,6 +117,20 @@ With the default output paths, Step 2 writes:
 - `data/processed/step2/output_step2_stats.tsv`
 
 The compact `*_final.tsv` file contains the most important columns for downstream review; `*_site_summary.tsv` keeps the fuller site-level output.
+
+### Selection status and retained rows
+
+When `--input-with-ids` is provided, Step 2 writes one output row for every input interval from `*_input_with_ids.tsv`. The `selection_status` column explains whether transcript selection was possible:
+
+- `SELECTED_TRANSCRIPT`: at least one transcript passed Step 1, and Step 2 selected one transcript according to `--policy`.
+- `NO_TRANSCRIPT`: no transcript passed the Step 1 transcript-overlap filter for that input interval. These rows are retained so the final output keeps the same row universe as the input.
+
+`NO_TRANSCRIPT` is different from `INTERGENIC`:
+
+- `NO_TRANSCRIPT` is a transcript-selection status: there was no passing transcript to select.
+- `INTERGENIC` is a region label from the union/evidence matrix.
+
+For `NO_TRANSCRIPT` rows, selected-transcript fields are blank, `dominant_region_selected` and `regions_present_selected` are set to `NO_TRANSCRIPT`, and the union fields (`dominant_region_union`, `regions_present_union`, and `bp_*_union`) still summarize the Step 1 matrix evidence for that input interval.
 
 ---
 
