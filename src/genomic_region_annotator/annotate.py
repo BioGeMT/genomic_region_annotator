@@ -398,6 +398,22 @@ def _normalize_query_coords(start: int, end: int, coords: str) -> tuple[int, int
     raise ValueError(f"Unknown coords convention: {coords}")
 
 
+def _genome_interval_to_tx_coords(start: int, end: int, tx_start: int, tx_end: int, strand: str) -> tuple[int, int]:
+    """Convert a genomic interval to 1-based transcript-oriented coordinates.
+
+    For plus-strand transcripts, coordinate 1 is tx_start. For minus-strand
+    transcripts, coordinate 1 is tx_end, so the genomic interval is reversed into
+    transcript 5-prime to 3-prime orientation.
+    """
+    s = int(start)
+    e = int(end)
+    if s > e:
+        s, e = e, s
+    if strand == "-":
+        return int(tx_end) - e + 1, int(tx_end) - s + 1
+    return s - int(tx_start) + 1, e - int(tx_start) + 1
+
+
 def _per_nt_region_flags_for_transcript(m: TranscriptModel, qiv: tuple[int, int]) -> dict[str, list[int]]:
     s, e = qiv
     L = e - s + 1
@@ -538,6 +554,8 @@ def _process_chunk(
         for m in passing:
             ov_s = max(s, m.tx_start)
             ov_e = min(e, m.tx_end)
+            read_tx_s, read_tx_e = _genome_interval_to_tx_coords(s, e, m.tx_start, m.tx_end, m.strand)
+            ov_tx_s, ov_tx_e = _genome_interval_to_tx_coords(ov_s, ov_e, m.tx_start, m.tx_end, m.strand)
             tx_rows.append(
                 {
                     "id": rid,
@@ -552,12 +570,12 @@ def _process_chunk(
                     "transcript_strand": m.strand,
                     "tx_start": m.tx_start,
                     "tx_end": m.tx_end,
-                    "read_start_in_tx_1based": (s - m.tx_start + 1),
-                    "read_end_in_tx_1based": (e - m.tx_start + 1),
+                    "read_start_in_tx_1based": read_tx_s,
+                    "read_end_in_tx_1based": read_tx_e,
                     "overlap_start_genome_1based": ov_s,
                     "overlap_end_genome_1based": ov_e,
-                    "overlap_start_in_tx_1based": (ov_s - m.tx_start + 1),
-                    "overlap_end_in_tx_1based": (ov_e - m.tx_start + 1),
+                    "overlap_start_in_tx_1based": ov_tx_s,
+                    "overlap_end_in_tx_1based": ov_tx_e,
                     "overlap_tx_bp": _ovl_bp(qiv, (m.tx_start, m.tx_end)),
                     "contained_100pct": 1 if _within(qiv, (m.tx_start, m.tx_end)) else 0,
                     "overlap_exon_bp": _sum_ovl_bp(qiv, m.exons),
