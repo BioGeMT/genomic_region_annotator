@@ -236,26 +236,94 @@ def _bp_from_matrix_rows(g: pd.DataFrame, read_len: int, nt_cols: list[str]) -> 
     return {"UTR3": utr3, "CDS": cds, "UTR5": utr5, "EXON_OTHER": exon_other, "INTRON": intron, "INTERGENIC": intergenic}
 
 
-def _precompute_union_bp_from_matrix(mx: pd.DataFrame, read_len_by_id: dict[str, int]) -> dict[str, dict[str, int]]:
-    """Precompute UNION bp summaries from the Step 1 matrix once.
+def _matrix_region_array(
+    block: pd.DataFrame,
+    *,
+    region: str,
+    ids: pd.Index,
+    nt_cols: list[str],
+) -> pd.DataFrame:
+    """Return one clipped per-id, per-nt matrix for a region inside an ID-aligned block."""
+    r = block.loc[block["region"] == region, ["id"] + nt_cols]
+    if r.empty:
+        return pd.DataFrame(0, index=ids, columns=nt_cols, dtype="int8")
 
-    This intentionally delegates to _bp_from_matrix_rows so the calculations stay
-    identical to the previous per-read implementation; it only moves the matrix
-    scan outside the transcript-selection loop.
+    vals = r.copy()
+    vals[nt_cols] = vals[nt_cols].fillna(0).astype("int8")
+    out = vals.groupby("id", sort=False)[nt_cols].sum().clip(upper=1)
+    return out.reindex(ids, fill_value=0).astype("int8")
+
+
+def _iter_id_aligned_matrix_chunks(mx: pd.DataFrame, target_rows: int = 60_000):
+    """Yield matrix chunks without splitting an id across chunks.
+
+    Step 1 writes the matrix in id order, with all region rows for one id together.
+    Keeping ids intact lets us vectorize region calculations per chunk while
+    preserving the original per-id logic.
+    """
+    n = len(mx)
+    start = 0
+    while start < n:
+        end = min(start + target_rows, n)
+        if end < n:
+            last_id = mx["id"].iloc[end - 1]
+            while end < n and mx["id"].iloc[end] == last_id:
+                end += 1
+        yield mx.iloc[start:end]
+        start = end
+
+
+def _precompute_union_bp_from_matrix(mx: pd.DataFrame, read_len_by_id: dict[str, int]) -> dict[str, dict[str, int]]:
+    """Precompute UNION bp summaries from the Step 1 matrix.
+
+    This is equivalent to applying _bp_from_matrix_rows per id, but it works on
+    ID-aligned chunks and vectorizes the per-nt region operations inside each
+    chunk. It keeps the exact EXON_OTHER definition:
+    EXON positions where CDS, UTR3, and UTR5 are all absent.
     """
     nt_cols = [c for c in mx.columns if c.startswith("nt_")]
     if not nt_cols:
         raise ValueError("Matrix TSV is missing nt_* columns.")
 
     union_by_id: dict[str, dict[str, int]] = {}
-    for rid, g in mx.groupby("id", sort=False):
-        rid_str = str(rid)
-        read_len = read_len_by_id.get(rid_str)
-        if read_len is None:
-            if "read_len" not in g.columns or g["read_len"].empty:
-                raise ValueError(f"Cannot determine read_len for matrix id={rid_str}.")
-            read_len = int(g["read_len"].iloc[0])
-        union_by_id[rid_str] = _bp_from_matrix_rows(g, read_len=read_len, nt_cols=nt_cols)
+
+    for block in _iter_id_aligned_matrix_chunks(mx):
+        ids = pd.Index(pd.unique(block["id"].astype(str)), name="id")
+
+        utr3 = _matrix_region_array(block, region="UTR3", ids=ids, nt_cols=nt_cols)
+        cds = _matrix_region_array(block, region="CDS", ids=ids, nt_cols=nt_cols)
+        utr5 = _matrix_region_array(block, region="UTR5", ids=ids, nt_cols=nt_cols)
+        exon = _matrix_region_array(block, region="EXON", ids=ids, nt_cols=nt_cols)
+        intron = _matrix_region_array(block, region="INTRON", ids=ids, nt_cols=nt_cols)
+        intergenic = _matrix_region_array(block, region="INTERGENIC", ids=ids, nt_cols=nt_cols)
+
+        utr3_bp = utr3.sum(axis=1).astype(int)
+        cds_bp = cds.sum(axis=1).astype(int)
+        utr5_bp = utr5.sum(axis=1).astype(int)
+        exon_bp = exon.sum(axis=1).astype(int)
+        intron_bp = intron.sum(axis=1).astype(int)
+        intergenic_bp = intergenic.sum(axis=1).astype(int)
+
+        exon_other_bp = ((exon == 1) & (cds == 0) & (utr3 == 0) & (utr5 == 0)).sum(axis=1).astype(int)
+
+        for rid in ids:
+            read_len = read_len_by_id.get(str(rid))
+            if read_len is None:
+                g = block.loc[block["id"].astype(str) == str(rid)]
+                if "read_len" not in g.columns or g["read_len"].empty:
+                    raise ValueError(f"Cannot determine read_len for matrix id={rid}.")
+                read_len = int(g["read_len"].iloc[0])
+
+            covered = min(int(read_len), int(exon_bp.loc[rid]) + int(intron_bp.loc[rid]))
+            union_by_id[str(rid)] = {
+                "UTR3": int(utr3_bp.loc[rid]),
+                "CDS": int(cds_bp.loc[rid]),
+                "UTR5": int(utr5_bp.loc[rid]),
+                "EXON_OTHER": int(exon_other_bp.loc[rid]),
+                "INTRON": int(intron_bp.loc[rid]),
+                "INTERGENIC": max(int(intergenic_bp.loc[rid]), int(read_len) - covered),
+            }
+
     return union_by_id
 
 
