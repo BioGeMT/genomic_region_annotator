@@ -22,6 +22,7 @@ PRIORITY = ["UTR3", "CDS", "UTR5", "EXON_OTHER", "INTRON", "INTERGENIC"]
 SUMMARY_COLUMNS = [
     "id",
     "read_len",
+    "selection_status",
     "policy",
     "dominance",
     "selected_transcript_id",
@@ -61,12 +62,15 @@ FINAL_COLUMNS = [
     "start",
     "end",
     "strand",
+    "selection_status",
     "selected_gene_name",
     "selected_transcript_id",
     "selected_read_start_in_tx_1based",
     "selected_read_end_in_tx_1based",
     "dominant_region_selected",
     "regions_present_selected",
+    "dominant_region_union",
+    "regions_present_union",
     "ambiguous_union_vs_selected",
 ]
 
@@ -233,11 +237,7 @@ def _matrix_region_array(block: pd.DataFrame, *, region: str, ids: pd.Index, nt_
     return out.reindex(ids, fill_value=0).astype("int8")
 
 
-def _iter_id_aligned_matrix_chunks_from_file(
-    matrix_tsv: str,
-    *,
-    chunksize: int = 60_000,
-) -> Iterator[pd.DataFrame]:
+def _iter_id_aligned_matrix_chunks_from_file(matrix_tsv: str, *, chunksize: int = 60_000) -> Iterator[pd.DataFrame]:
     """Yield matrix chunks from disk without splitting an id across chunks."""
     reader = pd.read_csv(matrix_tsv, sep="\t", dtype={"id": "string", "region": "string"}, chunksize=max(1, int(chunksize)))
     carry = pd.DataFrame()
@@ -352,6 +352,7 @@ def _make_summary_row(*, rid: str, g: pd.DataFrame, union_bp: dict[str, int], po
     return {
         "id": rid,
         "read_len": read_len,
+        "selection_status": "SELECTED_TRANSCRIPT",
         "policy": policy,
         "dominance": dominance,
         "selected_transcript_id": str(sel.get("transcript_id", "")),
@@ -386,8 +387,49 @@ def _make_summary_row(*, rid: str, g: pd.DataFrame, union_bp: dict[str, int], po
     }
 
 
+def _make_no_transcript_row(*, rid: str, read_len: int, union_bp: dict[str, int], policy: str, dominance: str) -> dict[str, Any]:
+    dom_union = _dominant_region(union_bp, dominance=dominance)
+    return {
+        "id": rid,
+        "read_len": int(read_len),
+        "selection_status": "NO_TRANSCRIPT",
+        "policy": policy,
+        "dominance": dominance,
+        "selected_transcript_id": "",
+        "selected_gene_id": "",
+        "selected_gene_name": "",
+        "selected_tx_start": None,
+        "selected_tx_end": None,
+        "selected_read_start_in_tx_1based": None,
+        "selected_read_end_in_tx_1based": None,
+        "selected_overlap_start_genome_1based": None,
+        "selected_overlap_end_genome_1based": None,
+        "selected_overlap_start_in_tx_1based": None,
+        "selected_overlap_end_in_tx_1based": None,
+        "dominant_region_selected": "NO_TRANSCRIPT",
+        "regions_present_selected": "NO_TRANSCRIPT",
+        "bp_utr3_selected": 0,
+        "bp_cds_selected": 0,
+        "bp_utr5_selected": 0,
+        "bp_exon_other_selected": 0,
+        "bp_intron_selected": 0,
+        "bp_intergenic_selected": 0,
+        "dominant_region_union": dom_union,
+        "regions_present_union": _regions_present(union_bp),
+        "bp_utr3_union": union_bp["UTR3"],
+        "bp_cds_union": union_bp["CDS"],
+        "bp_utr5_union": union_bp["UTR5"],
+        "bp_exon_other_union": union_bp["EXON_OTHER"],
+        "bp_intron_union": union_bp["INTRON"],
+        "bp_intergenic_union": union_bp["INTERGENIC"],
+        "ambiguous_union_vs_selected": 0,
+        "n_passing_transcripts": 0,
+    }
+
+
 def _init_step2_counters() -> tuple[dict[str, Counter], dict[str, int]]:
     counters = {
+        "selection_status": Counter(),
         "dominant_region_selected": Counter(),
         "dominant_region_union": Counter(),
         "regions_present_selected": Counter(),
@@ -417,7 +459,7 @@ def _stats_from_counters(counters: dict[str, Counter], totals: dict[str, int], t
         {"metric": "fraction_ambiguous_union_vs_selected", "value": round(amb / n_reads, 6) if n_reads else 0.0},
     ]
 
-    for col in ["dominant_region_selected", "dominant_region_union"]:
+    for col in ["selection_status", "dominant_region_selected", "dominant_region_union"]:
         for k, v in counters[col].most_common():
             rows.append({"metric": f"{col}_count__{k}", "value": int(v)})
             rows.append({"metric": f"{col}_fraction__{k}", "value": round(int(v) / n_reads, 6) if n_reads else 0.0})
@@ -427,6 +469,14 @@ def _stats_from_counters(counters: dict[str, Counter], totals: dict[str, int], t
             rows.append({"metric": f"top_{col}_{i}", "value": k})
             rows.append({"metric": f"top_{col}_{i}_count", "value": int(v)})
     return pd.DataFrame(rows)
+
+
+def _next_tx_group(tx_iter: Iterator[tuple[Any, pd.DataFrame]]) -> tuple[Optional[str], Optional[pd.DataFrame]]:
+    try:
+        rid, g = next(tx_iter)
+        return str(rid), g
+    except StopIteration:
+        return None, None
 
 
 def run(
@@ -452,26 +502,38 @@ def run(
 
     log(f"Reading transcripts: {transcripts_tsv}")
     tx = pd.read_csv(transcripts_tsv, sep="\t", dtype={"id": "string"})
-    if tx.empty:
-        raise ValueError("transcripts_tsv is empty (no passing transcripts).")
 
     input_by_id: dict[str, dict[str, Any]] = {}
     original_cols: list[str] = []
+    ordered_ids: list[str] = []
+    read_len_by_id: dict[str, int] = {}
     if input_ids_path and Path(input_ids_path).exists():
         log(f"Reading input_with_ids (for original columns): {input_ids_path}")
         input_df = pd.read_csv(input_ids_path, sep="\t", dtype={"id": "string"})
+        input_df["id"] = input_df["id"].astype(str)
+        ordered_ids = input_df["id"].tolist()
+        if "read_len" in input_df.columns:
+            read_len_by_id.update(input_df.set_index("id")["read_len"].astype(int).to_dict())
         original_cols = [c for c in input_df.columns if c not in SUMMARY_COLUMNS]
         input_by_id = input_df.set_index("id", drop=False)[original_cols].to_dict(orient="index")
     else:
         if input_ids_path:
             log(f"input_with_ids not found (skipping merge): {input_ids_path}")
 
+    if not tx.empty:
+        tx_read_len_by_id = tx.groupby("id", sort=False)["read_len"].first().astype(int).to_dict()
+        read_len_by_id.update({str(k): int(v) for k, v in tx_read_len_by_id.items()})
+        if not ordered_ids:
+            ordered_ids = [str(k) for k in tx.groupby("id", sort=False).groups.keys()]
+
+    if not ordered_ids:
+        raise ValueError("No ids available. Provide input_with_ids_tsv or a non-empty transcripts_tsv.")
+
     site_columns = ["id"] + [c for c in original_cols if c != "id"] + [c for c in SUMMARY_COLUMNS if c != "id"]
     final_columns = [c for c in FINAL_COLUMNS if c in site_columns]
 
     log(f"Reading matrix (UNION composition): {matrix_tsv}")
     log("Precomputing union bp from matrix...")
-    read_len_by_id = tx.groupby("id", sort=False)["read_len"].first().astype(int).to_dict()
     union_by_id = _precompute_union_bp_from_matrix_file(matrix_tsv, read_len_by_id=read_len_by_id)
 
     log("Selecting transcript per read and computing site summaries...")
@@ -487,13 +549,26 @@ def run(
     write_chunk_size = 10_000
     counters, totals = _init_step2_counters()
 
-    for rid, g in tx.groupby("id", sort=False):
-        rid_str = str(rid)
+    tx_iter = iter(tx.groupby("id", sort=False)) if not tx.empty else iter(())
+    current_tx_id, current_tx_group = _next_tx_group(tx_iter)
+
+    for rid_str in ordered_ids:
+        while current_tx_id is not None and current_tx_id < rid_str:
+            current_tx_id, current_tx_group = _next_tx_group(tx_iter)
+
         union_bp = union_by_id.get(rid_str)
         if union_bp is None:
-            raise ValueError(f"Matrix missing id={rid_str} present in transcripts.")
+            raise ValueError(f"Matrix missing id={rid_str} present in input/transcripts.")
 
-        row = _make_summary_row(rid=rid_str, g=g, union_bp=union_bp, policy=policy, dominance=dominance)
+        if current_tx_id == rid_str and current_tx_group is not None:
+            row = _make_summary_row(rid=rid_str, g=current_tx_group, union_bp=union_bp, policy=policy, dominance=dominance)
+            current_tx_id, current_tx_group = _next_tx_group(tx_iter)
+        else:
+            read_len = read_len_by_id.get(rid_str)
+            if read_len is None:
+                raise ValueError(f"Cannot determine read_len for id={rid_str}.")
+            row = _make_no_transcript_row(rid=rid_str, read_len=read_len, union_bp=union_bp, policy=policy, dominance=dominance)
+
         if input_by_id:
             merged = {"id": rid_str}
             merged.update(input_by_id.get(rid_str, {}))
@@ -533,6 +608,11 @@ def run(
 
     if report:
         log("Report (Step 2)")
+        status_counts = counters["selection_status"]
+        if len(status_counts):
+            log("Selection status:")
+            for k, v in status_counts.most_common():
+                log(f"  {k}: {v}")
         vc = counters["dominant_region_selected"]
         if len(vc):
             log("Top dominant_region_selected:")
