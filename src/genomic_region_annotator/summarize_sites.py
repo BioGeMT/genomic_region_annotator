@@ -92,7 +92,7 @@ def _maybe_int(row: pd.Series, col: str) -> Optional[int]:
         return int(v)
     except Exception:
         return None
-    
+
 
 def _select_transcript_clash_utr3_first(g: pd.DataFrame) -> pd.Series:
     df = g.copy()
@@ -143,8 +143,7 @@ def _bp_from_selected_row(row: pd.Series, read_len: int) -> dict[str, int]:
     return {"UTR3": utr3, "CDS": cds, "UTR5": utr5, "EXON_OTHER": exon_other, "INTRON": intron, "INTERGENIC": intergenic}
 
 
-def _bp_from_matrix_rows(g: pd.DataFrame, read_len: int) -> dict[str, int]:
-    nt_cols = [c for c in g.columns if c.startswith("nt_")]
+def _bp_from_matrix_rows(g: pd.DataFrame, read_len: int, nt_cols: list[str]) -> dict[str, int]:
     if not nt_cols:
         raise ValueError("Matrix TSV is missing nt_* columns.")
     gg = g.copy()
@@ -182,6 +181,29 @@ def _bp_from_matrix_rows(g: pd.DataFrame, read_len: int) -> dict[str, int]:
     intergenic = max(intergenic, read_len - covered)
 
     return {"UTR3": utr3, "CDS": cds, "UTR5": utr5, "EXON_OTHER": exon_other, "INTRON": intron, "INTERGENIC": intergenic}
+
+
+def _precompute_union_bp_from_matrix(mx: pd.DataFrame, read_len_by_id: dict[str, int]) -> dict[str, dict[str, int]]:
+    """Precompute UNION bp summaries from the Step 1 matrix once.
+
+    This intentionally delegates to _bp_from_matrix_rows so the calculations stay
+    identical to the previous per-read implementation; it only moves the matrix
+    scan outside the transcript-selection loop.
+    """
+    nt_cols = [c for c in mx.columns if c.startswith("nt_")]
+    if not nt_cols:
+        raise ValueError("Matrix TSV is missing nt_* columns.")
+
+    union_by_id: dict[str, dict[str, int]] = {}
+    for rid, g in mx.groupby("id", sort=False):
+        rid_str = str(rid)
+        read_len = read_len_by_id.get(rid_str)
+        if read_len is None:
+            if "read_len" not in g.columns or g["read_len"].empty:
+                raise ValueError(f"Cannot determine read_len for matrix id={rid_str}.")
+            read_len = int(g["read_len"].iloc[0])
+        union_by_id[rid_str] = _bp_from_matrix_rows(g, read_len=read_len, nt_cols=nt_cols)
+    return union_by_id
 
 
 def _stats_from_summary(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
@@ -255,36 +277,37 @@ def run(
         if input_ids_path:
             log(f"input_with_ids not found (skipping merge): {input_ids_path}")
 
+    log("Precomputing union bp from matrix...")
+    read_len_by_id = tx.groupby("id", sort=False)["read_len"].first().astype(int).to_dict()
+    union_by_id = _precompute_union_bp_from_matrix(mx, read_len_by_id=read_len_by_id)
+
     log("Selecting transcript per read and computing site summaries...")
     t0 = time.time()
 
-    mx_groups = {k: g for k, g in mx.groupby("id", sort=False)}
-
     rows: list[dict[str, Any]] = []
     for rid, g in tx.groupby("id", sort=False):
+        rid_str = str(rid)
         read_len = int(g["read_len"].iloc[0])
 
         sel = _select_transcript_clash_utr3_first(g)
         sel_bp = _bp_from_selected_row(sel, read_len=read_len)
 
-        mxg = mx_groups.get(rid)
-        if mxg is None:
-            raise ValueError(f"Matrix missing id={rid} present in transcripts.")
-        union_bp = _bp_from_matrix_rows(mxg, read_len=read_len)
+        union_bp = union_by_id.get(rid_str)
+        if union_bp is None:
+            raise ValueError(f"Matrix missing id={rid_str} present in transcripts.")
 
         dom_sel = _dominant_region(sel_bp, dominance=dominance)
         dom_union = _dominant_region(union_bp, dominance=dominance)
 
         rows.append(
             {
-                "id": str(rid),
+                "id": rid_str,
                 "read_len": read_len,
                 "policy": policy,
                 "dominance": dominance,
                 "selected_transcript_id": str(sel.get("transcript_id", "")),
                 "selected_gene_id": str(sel.get("gene_id", "")),
                 "selected_gene_name": str(sel.get("gene_name", "")),
-                # Transcript-relative coordinates for the SELECTED transcript (from Step 1 transcripts.tsv)
                 "selected_tx_start": _maybe_int(sel, "tx_start"),
                 "selected_tx_end": _maybe_int(sel, "tx_end"),
                 "selected_read_start_in_tx_1based": _maybe_int(sel, "read_start_in_tx_1based"),
@@ -323,7 +346,6 @@ def run(
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     log(f"Writing: {out_path}")
     out.to_csv(out_path, sep="\t", index=False)
-    # Write compact FINAL table (reduced columns)
     final_path = str(Path(out_path).with_name(
         Path(out_path).name.replace("_site_summary.tsv", "_final.tsv")
     ))
@@ -336,13 +358,10 @@ def run(
         "strand",
         "selected_gene_name",
         "selected_transcript_id",
-        # relative transcript coordinates
         "selected_read_start_in_tx_1based",
         "selected_read_end_in_tx_1based",
-        # region summary
         "dominant_region_selected",
         "regions_present_selected",
-        # ambiguity flag
         "ambiguous_union_vs_selected",
     ]
 
