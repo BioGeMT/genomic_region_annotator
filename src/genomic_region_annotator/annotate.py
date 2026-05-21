@@ -34,6 +34,21 @@ class TranscriptModel:
     utr3: tuple[tuple[int, int], ...]
 
 
+@dataclass
+class ChunkResult:
+    matrix_rows: list[dict[str, Any]]
+    tx_rows: list[dict[str, Any]]
+    tx_count_per_read: list[int]
+    reads_with_any_tx: int
+    reads_with_any_cds: int
+    reads_with_any_utr3: int
+    reads_with_any_utr5: int
+    reads_with_any_exon: int
+    reads_with_any_intron: int
+    region_total_ones: dict[str, int]
+    debug_logs: list[str]
+
+
 def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     if not intervals:
         return []
@@ -336,6 +351,33 @@ def _candidate_indices(
 
 
 REGIONS = ["CDS", "UTR5", "UTR3", "EXON", "INTRON", "INTERGENIC"]
+MATRIX_BASE_COLUMNS = ["id", "chr", "start", "end", "strand", "region", "read_len"]
+TRANSCRIPT_COLUMNS = [
+    "id",
+    "chr",
+    "start",
+    "end",
+    "strand",
+    "read_len",
+    "transcript_id",
+    "gene_id",
+    "gene_name",
+    "transcript_strand",
+    "tx_start",
+    "tx_end",
+    "read_start_in_tx_1based",
+    "read_end_in_tx_1based",
+    "overlap_start_genome_1based",
+    "overlap_end_genome_1based",
+    "overlap_start_in_tx_1based",
+    "overlap_end_in_tx_1based",
+    "overlap_tx_bp",
+    "contained_100pct",
+    "overlap_exon_bp",
+    "overlap_cds_bp",
+    "overlap_utr5_bp",
+    "overlap_utr3_bp",
+]
 
 
 def _normalize_query_coords(start: int, end: int, coords: str) -> tuple[int, int]:
@@ -354,6 +396,22 @@ def _normalize_query_coords(start: int, end: int, coords: str) -> tuple[int, int
             e1 = s1
         return s1, e1
     raise ValueError(f"Unknown coords convention: {coords}")
+
+
+def _genome_interval_to_tx_coords(start: int, end: int, tx_start: int, tx_end: int, strand: str) -> tuple[int, int]:
+    """Convert a genomic interval to 1-based transcript-oriented coordinates.
+
+    For plus-strand transcripts, coordinate 1 is tx_start. For minus-strand
+    transcripts, coordinate 1 is tx_end, so the genomic interval is reversed into
+    transcript 5-prime to 3-prime orientation.
+    """
+    s = int(start)
+    e = int(end)
+    if s > e:
+        s, e = e, s
+    if strand == "-":
+        return int(tx_end) - e + 1, int(tx_end) - s + 1
+    return s - int(tx_start) + 1, e - int(tx_start) + 1
 
 
 def _per_nt_region_flags_for_transcript(m: TranscriptModel, qiv: tuple[int, int]) -> dict[str, list[int]]:
@@ -424,6 +482,156 @@ def _safe_median(xs: list[int]) -> float:
     return float(statistics.median(xs)) if xs else 0.0
 
 
+def _append_rows(path: Path, rows: list[dict[str, Any]], columns: list[str], *, write_header: bool) -> bool:
+    if not rows:
+        return write_header
+    out = pd.DataFrame(rows).reindex(columns=columns)
+    nt_cols = [c for c in columns if c.startswith("nt_")]
+    if nt_cols:
+        out[nt_cols] = out[nt_cols].fillna(0).astype(int)
+    out.to_csv(path, sep="\t", index=False, mode="a", header=write_header)
+    return False
+
+
+def _empty_output(path: Path, columns: list[str]) -> None:
+    pd.DataFrame(columns=columns).to_csv(path, sep="\t", index=False)
+
+
+def _process_chunk(
+    chunk: pd.DataFrame,
+    *,
+    models: list[TranscriptModel],
+    index: dict[tuple[str, str, int], list[int]],
+    bin_size: int,
+    min_overlap_nt: Optional[int],
+    drop_intergenic: bool,
+    debug_row_id: Optional[int],
+) -> ChunkResult:
+    matrix_rows: list[dict[str, Any]] = []
+    tx_rows: list[dict[str, Any]] = []
+    tx_count_per_read: list[int] = []
+    region_total_ones = {r: 0 for r in REGIONS}
+    debug_logs: list[str] = []
+
+    reads_with_any_tx = 0
+    reads_with_any_cds = 0
+    reads_with_any_utr3 = 0
+    reads_with_any_utr5 = 0
+    reads_with_any_exon = 0
+    reads_with_any_intron = 0
+
+    for row_i, row in chunk.iterrows():
+        rid = str(row["id"])
+        chrom = str(row["chr"])
+        qstrand = str(row["strand"])
+        s = int(row["start_1based"])
+        e = int(row["end_1based"])
+        qiv = (s, e)
+        L = int(row["read_len"])
+
+        cand = _candidate_indices(chrom, qstrand, qiv, index=index, bin_size=bin_size)
+
+        passing: list[TranscriptModel] = []
+        for idx in cand:
+            m = models[idx]
+            if m.chrom != chrom:
+                continue
+            if qstrand in {"+", "-"} and m.strand != qstrand:
+                continue
+            tx_span = (m.tx_start, m.tx_end)
+            ov_tx = _ovl_bp(qiv, tx_span)
+            if min_overlap_nt is None:
+                if _within(qiv, tx_span):
+                    passing.append(m)
+            else:
+                if ov_tx >= int(min_overlap_nt):
+                    passing.append(m)
+
+        tx_count_per_read.append(len(passing))
+        if passing:
+            reads_with_any_tx += 1
+
+        for m in passing:
+            ov_s = max(s, m.tx_start)
+            ov_e = min(e, m.tx_end)
+            read_tx_s, read_tx_e = _genome_interval_to_tx_coords(s, e, m.tx_start, m.tx_end, m.strand)
+            ov_tx_s, ov_tx_e = _genome_interval_to_tx_coords(ov_s, ov_e, m.tx_start, m.tx_end, m.strand)
+            tx_rows.append(
+                {
+                    "id": rid,
+                    "chr": chrom,
+                    "start": s,
+                    "end": e,
+                    "strand": qstrand,
+                    "read_len": L,
+                    "transcript_id": m.transcript_id,
+                    "gene_id": m.gene_id,
+                    "gene_name": m.gene_name,
+                    "transcript_strand": m.strand,
+                    "tx_start": m.tx_start,
+                    "tx_end": m.tx_end,
+                    "read_start_in_tx_1based": read_tx_s,
+                    "read_end_in_tx_1based": read_tx_e,
+                    "overlap_start_genome_1based": ov_s,
+                    "overlap_end_genome_1based": ov_e,
+                    "overlap_start_in_tx_1based": ov_tx_s,
+                    "overlap_end_in_tx_1based": ov_tx_e,
+                    "overlap_tx_bp": _ovl_bp(qiv, (m.tx_start, m.tx_end)),
+                    "contained_100pct": 1 if _within(qiv, (m.tx_start, m.tx_end)) else 0,
+                    "overlap_exon_bp": _sum_ovl_bp(qiv, m.exons),
+                    "overlap_cds_bp": _sum_ovl_bp(qiv, m.cds),
+                    "overlap_utr5_bp": _sum_ovl_bp(qiv, m.utr5),
+                    "overlap_utr3_bp": _sum_ovl_bp(qiv, m.utr3),
+                }
+            )
+
+        per_tx_mats = [_per_nt_region_flags_for_transcript(m, qiv) for m in passing]
+        union = _or_region_matrices(per_tx_mats, L=L)
+
+        if sum(union["CDS"]) > 0:
+            reads_with_any_cds += 1
+        if sum(union["UTR3"]) > 0:
+            reads_with_any_utr3 += 1
+        if sum(union["UTR5"]) > 0:
+            reads_with_any_utr5 += 1
+        if sum(union["EXON"]) > 0:
+            reads_with_any_exon += 1
+        if sum(union["INTRON"]) > 0:
+            reads_with_any_intron += 1
+
+        for region in REGIONS:
+            if drop_intergenic and region == "INTERGENIC":
+                continue
+            region_total_ones[region] += int(sum(union[region]))
+            r = {"id": rid, "chr": chrom, "start": s, "end": e, "strand": qstrand, "region": region, "read_len": L}
+            for j in range(L):
+                r[f"nt_{j+1}"] = union[region][j]
+            matrix_rows.append(r)
+
+        if debug_row_id is not None and row_i == debug_row_id:
+            debug_logs.append(f"[DEBUG] id={rid} {chrom}:{s}-{e} strand={qstrand} L={L}")
+            debug_logs.append(f"[DEBUG] candidate_transcripts_in_bins={len(cand)} passing_filter={len(passing)}")
+            debug_logs.append("[DEBUG] union region sums:")
+            for region in REGIONS:
+                if drop_intergenic and region == "INTERGENIC":
+                    continue
+                debug_logs.append(f"  {region}: {sum(union[region])}/{L}")
+
+    return ChunkResult(
+        matrix_rows=matrix_rows,
+        tx_rows=tx_rows,
+        tx_count_per_read=tx_count_per_read,
+        reads_with_any_tx=reads_with_any_tx,
+        reads_with_any_cds=reads_with_any_cds,
+        reads_with_any_utr3=reads_with_any_utr3,
+        reads_with_any_utr5=reads_with_any_utr5,
+        reads_with_any_exon=reads_with_any_exon,
+        reads_with_any_intron=reads_with_any_intron,
+        region_total_ones=region_total_ones,
+        debug_logs=debug_logs,
+    )
+
+
 def run(
     *,
     input_path: str,
@@ -439,6 +647,7 @@ def run(
     report: bool = False,
     stats_out: Optional[str] = None,
     top_n: int = 20,
+    write_chunk_size: int = 10_000,
 ) -> None:
     base = _output_base(output_tsv)
     base_dir = base.parent if str(base.parent) not in {"", "."} else Path(".")
@@ -501,11 +710,20 @@ def run(
     log("Stage 4/7: per-read transcript filtering + matrix build")
     t0 = time.time()
 
-    matrix_rows: list[dict[str, Any]] = []
-    tx_rows: list[dict[str, Any]] = []
-
     n = len(df)
     progress_every = 2_000 if n < 50_000 else 10_000
+    write_chunk_size = max(1, int(write_chunk_size))
+    max_read_len = int(df["read_len"].max()) if n else 0
+    matrix_columns = MATRIX_BASE_COLUMNS + [f"nt_{i}" for i in range(1, max_read_len + 1)]
+
+    matrix_header = True
+    tx_header = True
+    matrix_wrote_rows = False
+    tx_wrote_rows = False
+
+    for p in [matrix_path, transcripts_path]:
+        if p.exists():
+            p.unlink()
 
     tx_count_per_read: list[int] = []
 
@@ -515,128 +733,59 @@ def run(
     reads_with_any_utr5 = 0
     reads_with_any_exon = 0
     reads_with_any_intron = 0
+    region_total_ones = {r: 0 for r in REGIONS}
 
-    for row_i, row in df.iterrows():
-        rid = str(row["id"])
-        chrom = str(row["chr"])
-        qstrand = str(row["strand"])
-        s = int(row["start_1based"])
-        e = int(row["end_1based"])
-        qiv = (s, e)
-        L = int(row["read_len"])
+    for start in range(0, n, write_chunk_size):
+        chunk = df.iloc[start : start + write_chunk_size]
+        result = _process_chunk(
+            chunk,
+            models=models,
+            index=index,
+            bin_size=bin_size,
+            min_overlap_nt=min_overlap_nt,
+            drop_intergenic=drop_intergenic,
+            debug_row_id=debug_row_id,
+        )
 
-        cand = _candidate_indices(chrom, qstrand, qiv, index=index, bin_size=bin_size)
+        matrix_header = _append_rows(matrix_path, result.matrix_rows, matrix_columns, write_header=matrix_header)
+        if result.matrix_rows:
+            matrix_wrote_rows = True
+        tx_header = _append_rows(transcripts_path, result.tx_rows, TRANSCRIPT_COLUMNS, write_header=tx_header)
+        if result.tx_rows:
+            tx_wrote_rows = True
 
-        passing: list[TranscriptModel] = []
-        for idx in cand:
-            m = models[idx]
-            if m.chrom != chrom:
-                continue
-            if qstrand in {"+", "-"} and m.strand != qstrand:
-                continue
-            tx_span = (m.tx_start, m.tx_end)
-            ov_tx = _ovl_bp(qiv, tx_span)
-            if min_overlap_nt is None:
-                if _within(qiv, tx_span):
-                    passing.append(m)
-            else:
-                if ov_tx >= int(min_overlap_nt):
-                    passing.append(m)
+        tx_count_per_read.extend(result.tx_count_per_read)
+        reads_with_any_tx += result.reads_with_any_tx
+        reads_with_any_cds += result.reads_with_any_cds
+        reads_with_any_utr3 += result.reads_with_any_utr3
+        reads_with_any_utr5 += result.reads_with_any_utr5
+        reads_with_any_exon += result.reads_with_any_exon
+        reads_with_any_intron += result.reads_with_any_intron
+        for region, ones in result.region_total_ones.items():
+            region_total_ones[region] += ones
+        for msg in result.debug_logs:
+            log(msg)
 
-        tx_count_per_read.append(len(passing))
-        if passing:
-            reads_with_any_tx += 1
-
-        for m in passing:
-            ov_s = max(s, m.tx_start)
-            ov_e = min(e, m.tx_end)
-            tx_rows.append(
-                {
-                    "id": rid,
-                    "chr": chrom,
-                    "start": s,
-                    "end": e,
-                    "strand": qstrand,
-                    "read_len": L,
-                    "transcript_id": m.transcript_id,
-                    "gene_id": m.gene_id,
-                    "gene_name": m.gene_name,
-                    "transcript_strand": m.strand,
-                    "tx_start": m.tx_start,
-                    "tx_end": m.tx_end,
-                    "read_start_in_tx_1based": (s - m.tx_start + 1),
-                    "read_end_in_tx_1based": (e - m.tx_start + 1),
-                    "overlap_start_genome_1based": ov_s,
-                    "overlap_end_genome_1based": ov_e,
-                    "overlap_start_in_tx_1based": (ov_s - m.tx_start + 1),
-                    "overlap_end_in_tx_1based": (ov_e - m.tx_start + 1),
-                    "overlap_tx_bp": _ovl_bp(qiv, (m.tx_start, m.tx_end)),
-                    "contained_100pct": 1 if _within(qiv, (m.tx_start, m.tx_end)) else 0,
-                    "overlap_exon_bp": _sum_ovl_bp(qiv, m.exons),
-                    "overlap_cds_bp": _sum_ovl_bp(qiv, m.cds),
-                    "overlap_utr5_bp": _sum_ovl_bp(qiv, m.utr5),
-                    "overlap_utr3_bp": _sum_ovl_bp(qiv, m.utr3),
-                }
-            )
-
-        per_tx_mats = [_per_nt_region_flags_for_transcript(m, qiv) for m in passing]
-        union = _or_region_matrices(per_tx_mats, L=L)
-
-        if sum(union["CDS"]) > 0:
-            reads_with_any_cds += 1
-        if sum(union["UTR3"]) > 0:
-            reads_with_any_utr3 += 1
-        if sum(union["UTR5"]) > 0:
-            reads_with_any_utr5 += 1
-        if sum(union["EXON"]) > 0:
-            reads_with_any_exon += 1
-        if sum(union["INTRON"]) > 0:
-            reads_with_any_intron += 1
-
-        for region in REGIONS:
-            if drop_intergenic and region == "INTERGENIC":
-                continue
-            r = {"id": rid, "chr": chrom, "start": s, "end": e, "strand": qstrand, "region": region, "read_len": L}
-            for j in range(L):
-                r[f"nt_{j+1}"] = union[region][j]
-            matrix_rows.append(r)
-
-        if debug_row_id is not None and row_i == debug_row_id:
-            log(f"[DEBUG] id={rid} {chrom}:{s}-{e} strand={qstrand} L={L}")
-            log(f"[DEBUG] candidate_transcripts_in_bins={len(cand)} passing_filter={len(passing)}")
-            log("[DEBUG] union region sums:")
-            for region in REGIONS:
-                if drop_intergenic and region == "INTERGENIC":
-                    continue
-                log(f"  {region}: {sum(union[region])}/{L}")
-
-        if (row_i + 1) % progress_every == 0:
+        processed = min(start + len(chunk), n)
+        if processed % progress_every == 0 or processed == n:
             elapsed = time.time() - t0
-            rate = (row_i + 1) / elapsed if elapsed > 0 else 0.0
-            log(f"Processed {row_i+1:,}/{n:,} reads ({rate:,.1f} reads/s)")
+            rate = processed / elapsed if elapsed > 0 else 0.0
+            log(f"Processed {processed:,}/{n:,} reads ({rate:,.1f} reads/s)")
 
-    log("Stage 5/7: write outputs")
-    out_df = pd.DataFrame(matrix_rows)
-    nt_cols = [c for c in out_df.columns if c.startswith("nt_")]
-    if nt_cols:
-        out_df[nt_cols] = out_df[nt_cols].fillna(0).astype(int)
-    out_df.to_csv(matrix_path, sep="\t", index=False)
-
-    tx_df = pd.DataFrame(tx_rows)
-    tx_df.to_csv(transcripts_path, sep="\t", index=False)
+    log("Stage 5/7: finalize streamed outputs")
+    if not matrix_wrote_rows:
+        _empty_output(matrix_path, matrix_columns)
+    if not tx_wrote_rows:
+        _empty_output(transcripts_path, TRANSCRIPT_COLUMNS)
 
     log("Stage 6/7: compute stats + write stats TSV")
     read_lens = df["read_len"].astype(int).tolist()
     total_reads = len(df)
     total_nt = int(sum(read_lens))
 
-    region_total_ones: dict[str, int] = {}
     region_frac: dict[str, float] = {}
-    if not out_df.empty and nt_cols:
-        for region, grp in out_df.groupby("region"):
-            ones = int(grp[nt_cols].sum().sum())
-            region_total_ones[str(region)] = ones
-            region_frac[str(region)] = float(ones / total_nt) if total_nt else 0.0
+    for region, ones in region_total_ones.items():
+        region_frac[str(region)] = float(ones / total_nt) if total_nt else 0.0
 
     stats_rows: list[dict[str, Any]] = []
     stats_rows.append({"metric": "step", "value": "step1_evidence_only"})
@@ -659,9 +808,8 @@ def run(
     for region in REGIONS:
         if drop_intergenic and region == "INTERGENIC":
             continue
-        if region in region_total_ones:
-            stats_rows.append({"metric": f"total_ones_{region}", "value": region_total_ones[region]})
-            stats_rows.append({"metric": f"fraction_ones_{region}", "value": round(region_frac[region], 6)})
+        stats_rows.append({"metric": f"total_ones_{region}", "value": region_total_ones[region]})
+        stats_rows.append({"metric": f"fraction_ones_{region}", "value": round(region_frac[region], 6)})
 
     pd.DataFrame(stats_rows).to_csv(stats_path, sep="\t", index=False)
 

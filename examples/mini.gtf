@@ -1,0 +1,10 @@
+1	example	exon	100	180	.	+	.	gene_id "GENE_PLUS"; transcript_id "TX_PLUS_1"; gene_name "PLUS1";
+1	example	CDS	130	160	.	+	0	gene_id "GENE_PLUS"; transcript_id "TX_PLUS_1"; gene_name "PLUS1";
+1	example	exon	200	260	.	+	.	gene_id "GENE_PLUS"; transcript_id "TX_PLUS_2"; gene_name "PLUS2";
+1	example	CDS	210	230	.	+	0	gene_id "GENE_PLUS"; transcript_id "TX_PLUS_2"; gene_name "PLUS2";
+1	example	three_prime_utr	231	260	.	+	.	gene_id "GENE_PLUS"; transcript_id "TX_PLUS_2"; gene_name "PLUS2";
+1	example	exon	500	580	.	-	.	gene_id "GENE_MINUS"; transcript_id "TX_MINUS_1"; gene_name "MINUS1";
+1	example	CDS	520	550	.	-	0	gene_id "GENE_MINUS"; transcript_id "TX_MINUS_1"; gene_name "MINUS1";
+1	example	exon	640	700	.	-	.	gene_id "GENE_MINUS"; transcript_id "TX_MINUS_2"; gene_name "MINUS2";
+1	example	CDS	660	680	.	-	0	gene_id "GENE_MINUS"; transcript_id "TX_MINUS_2"; gene_name "MINUS2";
+1	example	three_prime_utr	640	659	.	-	.	gene_id "GENE_MINUS"; transcript_id "TX_MINUS_2"; gene_name "MINUS2";
