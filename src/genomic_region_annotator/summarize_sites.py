@@ -239,7 +239,7 @@ def _matrix_region_array(block: pd.DataFrame, *, region: str, ids: pd.Index, nt_
 
 def _iter_id_aligned_matrix_chunks_from_file(matrix_tsv: str, *, chunksize: int = 60_000) -> Iterator[pd.DataFrame]:
     """Yield matrix chunks from disk without splitting an id across chunks."""
-    reader = pd.read_csv(matrix_tsv, sep="\t", dtype={"id": "string", "region": "string"}, chunksize=max(1, int(chunksize)))
+    reader = pd.read_csv(matrix_tsv, sep="\t", dtype={"id": "string", "chr": "string", "strand": "string", "region": "string"}, chunksize=max(1, int(chunksize)))
     carry = pd.DataFrame()
     saw_rows = False
 
