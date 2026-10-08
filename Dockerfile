@@ -10,6 +10,14 @@ WORKDIR /app
 
 RUN echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        gzip \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY environment.yml pyproject.toml README.md LICENSE ./
 COPY src ./src
 COPY scripts ./scripts
