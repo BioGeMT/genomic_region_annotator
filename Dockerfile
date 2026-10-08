@@ -2,6 +2,11 @@ FROM continuumio/miniconda3:24.7.1-0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+ARG http_proxy
+ARG https_proxy
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
@@ -25,7 +30,7 @@ COPY scripts ./scripts
 RUN conda env update --name base --file environment.yml \
     && conda clean --all --yes \
     && python -m pip install --no-deps . \
-    && command -v wget \
+    && (command -v curl || command -v wget) \
     && command -v gunzip
 
 RUN useradd --create-home --shell /usr/sbin/nologin appuser
