@@ -24,6 +24,40 @@ conda activate genomic-region-annotator
 pip install -e .
 ```
 
+## Docker
+
+Published images are available from GHCR:
+
+```bash
+docker pull ghcr.io/biogemt/genomic-region-annotator:<version>
+```
+
+Run the CLI without installing Python, Conda, or project dependencies on the host:
+
+```bash
+docker run --rm \
+  ghcr.io/biogemt/genomic-region-annotator:<version> \
+  --help
+```
+
+For analyses, keep input, output, cache, and reference data outside the image and provide them with mounted directories:
+
+```bash
+mkdir -p results .cache/genomic-region-annotator
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:$PWD" \
+  -w "$PWD" \
+  ghcr.io/biogemt/genomic-region-annotator:<version> \
+  annotate \
+  --input examples/mini_intervals.tsv \
+  --gtf examples/mini.gtf \
+  --output results/mini.tsv
+```
+
+Do not bake downloaded Ensembl GTF files or other genomic reference datasets into derived images. Supply those files at runtime through mounted directories.
+
 ---
 
 ## Input format
@@ -169,4 +203,3 @@ Example:
 8. tie-breakers: contained_100pct, then transcript_id
 
 ---
-
